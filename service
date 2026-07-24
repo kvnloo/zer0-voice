@@ -15,7 +15,7 @@ if [ -z "$thread" ]; then
     exit 2
 fi
 
-state="${XDG_STATE_HOME:-$HOME/.local/state}/zer0-voice"
+state="${ZERO_VOICE_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/zer0-voice}"
 mkdir -p "$state"
 
 # Prevent two microphones from submitting the same utterance. The flock parent
@@ -33,27 +33,15 @@ fi
 release_state="${ZERO_VOICE_RELEASE_STATE:-$state/releases}"
 bundle_root=$(python "$root/voice/release.py" \
     --state "$release_state" resolve --path)
-duplex_runtime="$bundle_root/voice/duplex"
-watchdog_runtime="$bundle_root/voice/watchdog.py"
 echo "Voice release pinned: ${bundle_root##*/}" >&2
 
 voice_pid=
 relay_pid=
-watchdog_pid=
-retired_pids=()
 cleanup() {
-    if [ -n "$watchdog_pid" ]; then
-        kill "$watchdog_pid" 2>/dev/null || true
-        wait "$watchdog_pid" 2>/dev/null || true
-    fi
     if [ -n "$voice_pid" ]; then
         kill "$voice_pid" 2>/dev/null || true
         wait "$voice_pid" 2>/dev/null || true
     fi
-    for pid in "${retired_pids[@]}"; do
-        kill -KILL "$pid" 2>/dev/null || true
-        wait "$pid" 2>/dev/null || true
-    done
     if [ -n "$relay_pid" ]; then
         kill "$relay_pid" 2>/dev/null || true
         wait "$relay_pid" 2>/dev/null || true
@@ -112,84 +100,25 @@ if ! curl -fsS --max-time 1 "$relay_url/healthz" >/dev/null 2>&1; then
 fi
 echo "PM event relay ready" >&2
 
-backoff=1
-while :; do
-    # Dependencies can fail after initial startup. Repair them before each
-    # worker generation instead of reconnecting a fresh worker to a dead TTS.
-    if ! curl -fsS --max-time 1 "$kokoro_url/health" >/dev/null 2>&1; then
-        "$kokoro_launcher" start
-        attempts=0
-        until curl -fsS --max-time 1 "$kokoro_url/health" >/dev/null 2>&1; do
-            attempts=$((attempts + 1))
-            if [ "$attempts" -ge 600 ]; then
-                echo "Kokoro recovery timed out at $kokoro_url" >&2
-                sleep "$backoff"
-                continue 2
-            fi
-            sleep 0.1
-        done
-    fi
-    started=$(date +%s)
-    "$duplex_runtime" \
-        --session "$thread" \
-        --app-server shared \
-        --no-workspace-routing \
-        --kokoro-url "$kokoro_url" \
-        --committed-voice-url "$relay_url/v1/voice/committed" \
-        --pm-publisher candidate \
-        --input "${ZERO_VOICE_INPUT:-default}" \
-        --output "${ZERO_VOICE_OUTPUT:-effect_input.aural_evolution}" \
-        --mic-mode "${ZERO_VOICE_MIC_MODE:-continuous}" \
-        --notification-mode "${ZERO_VOICE_NOTIFICATION_MODE:-conversational}" \
-        --live-model "${ZERO_VOICE_LIVE_MODEL:-gpt-5.6-luna}" \
-        --live-effort "${ZERO_VOICE_LIVE_EFFORT:-low}" \
-        --live-timeout "${ZERO_VOICE_LIVE_TIMEOUT:-35}" \
-        --live-acknowledgments \
-        --barge-in "${ZERO_VOICE_BARGE_IN:-final}" \
-        --startup-phrase "" \
-        --keyboard-indicator "${ZERO_WOOTING_INDICATOR:-none}" \
-        --metrics "$root/bench/voice-history.jsonl" \
-        --debug-events "$state/voice-debug.jsonl" \
-        --health "$state/health.json" &
-    voice_pid=$!
-    "$watchdog_runtime" \
-        --pid "$voice_pid" \
-        --health "$state/health.json" \
-        --kokoro-health "$kokoro_url/health" &
-    watchdog_pid=$!
-    # Race functional health against process exit. A worker trapped in
-    # uninterruptible I/O must not block creation of its replacement forever.
-    set +e
-    wait -n "$voice_pid" "$watchdog_pid"
-    first_status=$?
-    set -e
-    if kill -0 "$voice_pid" 2>/dev/null; then
-        kill -KILL "$voice_pid" 2>/dev/null || true
-        retired_pids+=("$voice_pid")
-        status=137
-    else
-        status=$first_status
-    fi
-    kill "$watchdog_pid" 2>/dev/null || true
-    wait "$watchdog_pid" 2>/dev/null || true
-    watchdog_pid=
-    voice_pid=
-    survivors=()
-    for pid in "${retired_pids[@]}"; do
-        if kill -0 "$pid" 2>/dev/null; then
-            survivors+=("$pid")
-        else
-            wait "$pid" 2>/dev/null || true
-        fi
-    done
-    retired_pids=("${survivors[@]}")
-    uptime=$(($(date +%s) - started))
-    if [ "$uptime" -ge 60 ]; then
-        backoff=1
-    fi
-    echo "voice exited status=$status; restarting in ${backoff}s" >&2
-    sleep "$backoff"
-    if [ "$backoff" -lt 8 ]; then
-        backoff=$((backoff * 2))
-    fi
-done
+# This stable owner keeps the public control socket and authoritative thread
+# while immutable duplex generations warm, switch, recover, and roll back.
+python "$bundle_root/voice/runtime_manager.py" "$thread" \
+    --root "$root" \
+    --state "$state" \
+    --release-state "$release_state" \
+    --kokoro-url "$kokoro_url" \
+    --kokoro-launcher "$kokoro_launcher" \
+    --relay-url "$relay_url" \
+    --input "${ZERO_VOICE_INPUT:-default}" \
+    --output "${ZERO_VOICE_OUTPUT:-effect_input.aural_evolution}" \
+    --mic-mode "${ZERO_VOICE_MIC_MODE:-continuous}" \
+    --notification-mode "${ZERO_VOICE_NOTIFICATION_MODE:-conversational}" \
+    --live-model "${ZERO_VOICE_LIVE_MODEL:-gpt-5.6-luna}" \
+    --live-effort "${ZERO_VOICE_LIVE_EFFORT:-low}" \
+    --live-timeout "${ZERO_VOICE_LIVE_TIMEOUT:-35}" \
+    --barge-in "${ZERO_VOICE_BARGE_IN:-final}" \
+    --keyboard-indicator "${ZERO_WOOTING_INDICATOR:-none}" \
+    --metrics "$root/bench/voice-history.jsonl" \
+    --debug-events "$state/voice-debug.jsonl" &
+voice_pid=$!
+wait "$voice_pid"

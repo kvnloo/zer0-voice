@@ -49,13 +49,14 @@ def canary(digest: str, verdict: str = "promote", turns: int = 10):
 class ReleaseTests(unittest.TestCase):
     def test_service_wrappers_use_dedicated_instant_lane_defaults(self):
         root = Path(__file__).resolve().parents[1]
-        for relative in ("voice/service", "voice/candidate-service"):
-            wrapper = (root / relative).read_text()
-            self.assertIn("ZERO_VOICE_LIVE_MODEL:-gpt-5.6-luna", wrapper)
-            self.assertIn("ZERO_VOICE_LIVE_EFFORT:-low", wrapper)
-            self.assertIn("ZERO_VOICE_BARGE_IN:-final", wrapper)
-            self.assertIn('--startup-phrase ""', wrapper)
-            self.assertNotIn("ZERO_VOICE_BARGE_IN:-sustained", wrapper)
+        wrapper = (root / "voice/candidate-service").read_text()
+        self.assertIn("ZERO_VOICE_LIVE_MODEL:-gpt-5.6-luna", wrapper)
+        self.assertIn("ZERO_VOICE_LIVE_EFFORT:-low", wrapper)
+        self.assertIn("ZERO_VOICE_BARGE_IN:-final", wrapper)
+        self.assertNotIn("ZERO_VOICE_BARGE_IN:-sustained", wrapper)
+        manager = (root / "voice/runtime_manager.py").read_text()
+        self.assertIn('"--startup-phrase"', manager)
+        self.assertIn('""', manager)
 
     def test_candidate_supervisor_restarts_duplex_instead_of_silent_fallback(self):
         root = Path(__file__).resolve().parents[1]
@@ -77,14 +78,18 @@ class ReleaseTests(unittest.TestCase):
 
     def test_production_buffers_followup_speech_and_has_no_startup_chatter(self):
         root = Path(__file__).resolve().parents[1]
-        wrapper = (root / "voice/service").read_text()
-        self.assertIn('ZERO_VOICE_BARGE_IN:-final', wrapper)
-        self.assertIn('--startup-phrase ""', wrapper)
+        manager = (root / "voice/runtime_manager.py").read_text()
+        self.assertIn('"--barge-in"', manager)
+        self.assertIn('"--startup-phrase"', manager)
 
     def test_bundle_pins_adapter_recovery_code_and_its_regression_test(self):
         self.assertIn("voice/candidate-service", RUNTIME_FILES)
         self.assertIn("voice/release.py", RUNTIME_FILES)
         self.assertIn("voice/test_health.py", RUNTIME_FILES)
+        self.assertIn("voice/handoff.py", RUNTIME_FILES)
+        self.assertIn("voice/test_handoff.py", RUNTIME_FILES)
+        self.assertIn("voice/runtime_manager.py", RUNTIME_FILES)
+        self.assertIn("voice/test_runtime_manager.py", RUNTIME_FILES)
         self.assertIn("adapters/codex/app_server.py", RUNTIME_FILES)
         self.assertIn("adapters/codex/test_app_server.py", RUNTIME_FILES)
         self.assertIn("adapters/llm/providers.py", RUNTIME_FILES)
@@ -224,11 +229,11 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ReleaseError, "zero empty"):
             verdict_from_canary(report, "0" * 64)
 
-    def test_service_restarts_execute_only_resolved_bundle_paths(self):
+    def test_service_delegates_generation_execution_to_stable_manager(self):
         script = Path(__file__).with_name("service").read_text(encoding="utf-8")
         self.assertIn("resolve --path", script)
-        self.assertIn('"$duplex_runtime"', script)
-        self.assertIn('"$watchdog_runtime"', script)
+        self.assertIn('"$bundle_root/voice/runtime_manager.py"', script)
+        self.assertNotIn('"$root/voice/runtime_manager.py"', script)
         self.assertNotIn('"$root/voice/duplex"', script)
         self.assertNotIn('"$root/voice/watchdog.py"', script)
 

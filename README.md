@@ -224,21 +224,20 @@ python voice/release.py rollback --apply
 
 The release CLI never launches a candidate. Shadow/canary code is contractually
 forbidden from owning the production microphone, authoritative Codex thread,
-or audio sink. Promotion does not restart or signal the live service. On its
-next intentional launch, `service` resolves one verified production bundle and
-uses its pinned `duplex` and `watchdog.py` for every supervised generation;
-dirty worktree Python cannot enter through a watchdog restart.
+or audio sink. `service` resolves a verified bundle and runs that bundle's
+pinned `runtime_manager.py`; dirty worktree Python cannot enter a restart or
+rollout. The manager follows later verified pointer changes, warms the selected
+immutable generation with capture muted, switches only at an idle boundary,
+and retains the prior attached generation through health probation.
 
 `service` holds a single-instance lock, waits for Kokoro's CUDA warmup, starts
-the canonical PM event relay when needed, and supervises `duplex` with bounded
-restart backoff. A privacy-safe heartbeat records only the worker PID, run,
-phase, lane, and timestamps. Its watchdog restarts an alive-but-stuck worker
-when the heartbeat expires, a bounded attach/transcribe/generate/speak phase
-overruns, the managed app-server transport closes, or Kokoro fails three
-consecutive health probes. Before every worker generation the supervisor
-repairs Kokoro when necessary, then reconnects fresh app-server and audio
-clients. The worker attaches to the supplied existing conversation; stopping
-or reattaching the visible TUI does not silently create a second conversation.
+the canonical PM event relay when needed, and delegates generations to one
+stable manager/control endpoint. A privacy-safe heartbeat records only the
+worker PID, run, phase, lane, and timestamps. Stale heartbeats, bounded
+attach/transcribe/generate/speak deadlines, process exits, and Kokoro failure
+trigger repair and replacement. Failed rollouts restore the old mic owner
+before terminating the candidate. Every generation attaches to the same
+supplied conversation; reattaching the visible TUI does not create another.
 
 Inspect functional health without reading transcripts:
 
