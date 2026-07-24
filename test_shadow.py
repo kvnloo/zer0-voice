@@ -118,9 +118,11 @@ class ShadowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(report["promotion"]["eligible"])
         self.assertEqual(report["counts"]["completed"], 10)
         self.assertEqual(report["counts"]["empty_model_outputs"], 0)
-        release_verdict = verdict_from_canary(report, "0" * 64)
-        self.assertEqual(release_verdict["verdict"], "promote")
-        self.assertEqual(release_verdict["completed_turns"], 10)
+        with self.assertRaisesRegex(
+            ValueError,
+            "physical continuous-voice",
+        ):
+            verdict_from_canary(report, "0" * 64)
         self.assertEqual(report["latencies"]["asr_seconds"]["p95"], 0.1)
         self.assertEqual(report["latencies"]["model_seconds"]["p95"], 0.2)
         self.assertEqual(

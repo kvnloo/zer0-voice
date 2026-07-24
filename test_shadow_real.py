@@ -156,10 +156,11 @@ class ShadowRealTests(unittest.IsolatedAsyncioTestCase):
             atomic_report(path, report)
             loaded = json.loads(path.read_text())
             self.assertEqual(loaded, report)
-            self.assertEqual(
-                verdict_from_canary(loaded, "a" * 64)["verdict"],
-                "promote",
-            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "physical continuous-voice",
+            ):
+                verdict_from_canary(loaded, "a" * 64)
             self.assertEqual(list(path.parent.glob(".cohort.json.*")), [])
 
 

@@ -32,6 +32,7 @@ def source(root: Path, marker: str) -> Path:
 def canary(digest: str, verdict: str = "promote", turns: int = 10):
     report = {
         "schema": 1,
+        "pipeline": "codex-continuous-pcm-v5",
         "status": "passed" if verdict == "promote" else "collecting",
         "promotion": {
             "eligible": verdict == "promote",
@@ -227,6 +228,21 @@ class ReleaseTests(unittest.TestCase):
             "counts": {"empty_model_outputs": 1},
         }
         with self.assertRaisesRegex(ReleaseError, "zero empty"):
+            verdict_from_canary(report, "0" * 64)
+
+    def test_shadow_only_report_cannot_authorize_production(self):
+        report = {
+            "schema": 1,
+            "pipeline": "voice-shadow-v1",
+            "status": "passed",
+            "promotion": {
+                "eligible": True,
+                "verdict": "promote",
+                "observed_completed_turns": 10,
+            },
+            "counts": {"empty_model_outputs": 0},
+        }
+        with self.assertRaisesRegex(ReleaseError, "physical continuous-voice"):
             verdict_from_canary(report, "0" * 64)
 
     def test_service_delegates_generation_execution_to_stable_manager(self):

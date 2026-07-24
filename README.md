@@ -195,10 +195,21 @@ runtime. Every command is a dry run unless `--apply` is supplied:
 python voice/release.py stage
 python voice/release.py stage --apply
 
-# Run the candidate canary externally without production mic/thread/sink
-# ownership, then reduce its privacy-safe report to a bundle-bound verdict.
+# First run the isolated GPU/model shadow. It proves adapter quality without
+# production mic/thread/sink ownership, but cannot authorize production.
+STAGED_BUNDLE/voice/shadow-real \
+  --report /tmp/voice-shadow.json
+
+# Then run the physical candidate and collect ten real continuous turns.
+# Only voice/canary.py's codex-continuous-pcm-v5 report can authorize release.
+PYTHONPATH=voice python voice/canary.py \
+  --metrics bench/voice-history.jsonl \
+  --debug "${XDG_STATE_HOME:-$HOME/.local/state}/zer0-voice/voice-debug.jsonl" \
+  --health "${XDG_STATE_HOME:-$HOME/.local/state}/zer0-voice/health.json" \
+  > /tmp/voice-physical-canary.json
+
 python voice/release.py verdict BUNDLE_SHA \
-  --canary /path/to/transcript-free-canary.json > /tmp/voice-verdict.json
+  --canary /tmp/voice-physical-canary.json > /tmp/voice-verdict.json
 
 python voice/release.py promote BUNDLE_SHA \
   --verdict /tmp/voice-verdict.json
@@ -210,7 +221,10 @@ Only an exact `promote` verdict with at least ten completed turns can replace
 `production.json`; `hold`, `reject`, malformed, transcript-bearing, short, or
 bundle-mismatched verdicts leave it byte-for-byte unchanged. Promotion also
 requires an explicit privacy-safe `empty_model_outputs: 0` count; missing or
-nonzero evidence fails closed. Bundle manifests
+nonzero evidence fails closed. A passing isolated `voice-shadow-v1` report is
+necessary adapter evidence but is deliberately rejected as release authority;
+the verdict must identify the physical `codex-continuous-pcm-v5` pipeline.
+Bundle manifests
 hash every allowlisted runtime file, use the manifest hash as the directory
 name, reject symlinks and extra files, and are reverified on every resolve.
 Promotion writes an immutable verification record before atomically replacing

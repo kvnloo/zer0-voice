@@ -18,6 +18,7 @@ from typing import Any, Iterable
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = 1
 MINIMUM_TURNS = 10
+PRODUCTION_PIPELINE = "codex-continuous-pcm-v5"
 MANIFEST = "manifest.json"
 RUNTIME_FILES = (
     "voice/candidate-service",
@@ -279,6 +280,10 @@ def verdict_from_canary(canary: dict[str, Any], digest: str) -> dict[str, Any]:
         or promotion.get("eligible") is not True
     ):
         raise ReleaseError("promote verdict requires a passed, eligible canary")
+    if verdict == "promote" and canary.get("pipeline") != PRODUCTION_PIPELINE:
+        raise ReleaseError(
+            "promotion requires the physical continuous-voice pipeline"
+        )
     return {
         "schema": SCHEMA,
         "bundle_sha256": digest,
