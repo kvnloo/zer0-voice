@@ -17,6 +17,7 @@ from duplex import (
     Speaker,
     UtteranceDetector,
     adaptive_threshold,
+    append_debug,
     append_metric,
     next_final,
     publish_transcript,
@@ -106,6 +107,15 @@ class DuplexTests(unittest.TestCase):
             append_metric(path, {"schema": 1, "route": "zerOS", "total_seconds": 2.0})
             rows = [json.loads(line) for line in path.read_text().splitlines()]
         self.assertEqual([row["route"] for row in rows], ["pm", "zerOS"])
+
+    def test_debug_ledger_records_live_transcript_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "debug.jsonl"
+            append_debug(path, "speech.confirmed")
+            append_debug(path, "asr.partial", text="hello world")
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+        self.assertEqual(rows[0]["kind"], "speech.confirmed")
+        self.assertEqual(rows[1]["text"], "hello world")
 
     @patch("duplex.urllib.request.urlopen")
     def test_transcript_event_preserves_text_and_thread(self, urlopen):

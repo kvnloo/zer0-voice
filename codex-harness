@@ -96,6 +96,7 @@ fi
     --input "${ZERO_VOICE_INPUT:-Blue Snowball}" \
     --output "${ZERO_VOICE_OUTPUT:-effect_input.aural_evolution}" \
     --metrics "$root/bench/voice-history.jsonl" \
+    --debug-events "$state/voice-debug.jsonl" \
     >"$log" 2>&1 &
 voice_pid=$!
 

@@ -41,6 +41,13 @@ class AudioEvent:
     audio: np.ndarray | None = None
 
 
+def append_debug(path: Path, kind: str, **fields: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    row = {"schema": 1, "ts_ns": time.time_ns(), "kind": kind, **fields}
+    with path.open("a", encoding="utf-8") as output:
+        output.write(json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n")
+
+
 def append_metric(path: Path, metric: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as output:
@@ -104,6 +111,8 @@ class UtteranceDetector:
         self.silent = 0
         self.active = False
         self.confirmed = False
+        self.preview_blocks = max(1, 600 // config.block_ms)
+        self.last_preview_at = 0
 
     def push(self, block: np.ndarray) -> list[AudioEvent]:
         block = np.asarray(block, dtype=np.float32).reshape(-1)
@@ -134,6 +143,12 @@ class UtteranceDetector:
             ):
                 self.confirmed = True
                 events.append(AudioEvent("speech.confirmed"))
+        if (
+            self.confirmed
+            and len(self.utterance) - self.last_preview_at >= self.preview_blocks
+        ):
+            self.last_preview_at = len(self.utterance)
+            events.append(AudioEvent("speech.preview", np.concatenate(self.utterance)))
         self.silent = 0 if voice else self.silent + 1
         max_blocks = int(self.config.max_seconds * 1000 / self.config.block_ms)
         if self.silent >= self.config.silence_blocks or len(self.utterance) >= max_blocks:
@@ -151,6 +166,7 @@ class UtteranceDetector:
         self.voiced = self.active_voiced = self.silent = 0
         self.active = False
         self.confirmed = False
+        self.last_preview_at = 0
 
 
 def adaptive_threshold(levels: np.ndarray) -> float:
@@ -614,9 +630,12 @@ async def next_final(
     turn: DuplexTurn | None = None,
     *,
     interrupt_mode: str = "final",
+    on_event=None,
 ) -> np.ndarray:
     while True:
         event = await mic.next()
+        if on_event:
+            on_event(event)
         should_interrupt = (
             interrupt_mode == "immediate" and event.kind == "speech.started"
         ) or (
@@ -626,6 +645,80 @@ async def next_final(
             await turn.interrupt()
         if event.kind == "speech.final" and event.audio is not None:
             return event.audio
+
+
+async def transcribe_only(
+    model,
+    mic: Microphone,
+    args,
+    *,
+    config: ListenConfig,
+    input_name: str,
+) -> None:
+    debug_path = args.debug_events
+    asr_lock = asyncio.Lock()
+    preview_task: asyncio.Task | None = None
+    last_preview = ""
+
+    async def preview(audio: np.ndarray) -> None:
+        nonlocal last_preview
+        async with asr_lock:
+            text = await asyncio.to_thread(transcribe, model, audio, args.language)
+        if text and text != last_preview:
+            last_preview = text
+            print(f"You[partial]: {text}", flush=True)
+            if debug_path:
+                await asyncio.to_thread(
+                    append_debug, debug_path, "asr.partial", text=text
+                )
+
+    def observe(event: AudioEvent) -> None:
+        nonlocal preview_task
+        if debug_path and event.kind in (
+            "speech.started",
+            "speech.confirmed",
+            "audio.warning",
+        ):
+            asyncio.create_task(
+                asyncio.to_thread(append_debug, debug_path, event.kind)
+            )
+        if event.kind == "speech.preview" and event.audio is not None:
+            if preview_task is None or preview_task.done():
+                preview_task = asyncio.create_task(preview(event.audio.copy()))
+
+    mic.start()
+    if debug_path:
+        await asyncio.to_thread(
+            append_debug,
+            debug_path,
+            "voice.listening",
+            mode="transcribe-only",
+            input=input_name,
+            threshold=round(config.threshold, 6),
+        )
+    print(
+        f"Live transcription ready. input={input_name!r} "
+        f"threshold={config.threshold:.4f} Ctrl-C exits.",
+        flush=True,
+    )
+    try:
+        while True:
+            audio = await next_final(mic, on_event=observe)
+            async with asr_lock:
+                text = await asyncio.to_thread(
+                    transcribe, model, audio, args.language
+                )
+            if text:
+                last_preview = text
+                print(f"You[final]: {text}", flush=True)
+                if debug_path:
+                    await asyncio.to_thread(
+                        append_debug, debug_path, "asr.final", text=text
+                    )
+    finally:
+        mic.close()
+        if preview_task and not preview_task.done():
+            preview_task.cancel()
 
 
 async def run(args) -> None:
@@ -668,10 +761,34 @@ async def run(args) -> None:
         )
     config = ListenConfig(threshold=threshold, silence_ms=args.silence_ms)
     mic = Microphone(config, device=args.input)
-    async with CodexAppServer(
-        cwd=args.cwd,
-        shared=args.app_server == "shared",
-    ) as server:
+    if args.transcribe_only:
+        await transcribe_only(
+            model,
+            mic,
+            args,
+            config=config,
+            input_name=input_name,
+        )
+        return
+    debug_path = args.debug_events
+    if debug_path:
+        await asyncio.to_thread(
+            append_debug, debug_path, "voice.starting", session=args.session or ""
+        )
+    try:
+        server_context = CodexAppServer(
+            cwd=args.cwd,
+            shared=args.app_server == "shared",
+            startup_timeout=args.session_timeout,
+        )
+        server = await server_context.__aenter__()
+    except Exception as error:
+        if debug_path:
+            await asyncio.to_thread(
+                append_debug, debug_path, "voice.error", message=str(error)
+            )
+        raise
+    try:
         harness_thread = await existing_harness_thread(
             server,
             args.cwd,
@@ -679,6 +796,13 @@ async def run(args) -> None:
             timeout=args.session_timeout,
         )
         print(f"Voice attached to existing Codex thread {harness_thread}.", flush=True)
+        if debug_path:
+            await asyncio.to_thread(
+                append_debug,
+                debug_path,
+                "voice.attached",
+                session=harness_thread,
+            )
         workspace = (
             WorkspaceRouter(load_routes(args.routes))
             if args.workspace_routing
@@ -700,26 +824,84 @@ async def run(args) -> None:
             )
             await startup_speaker.say(args.startup_phrase)
         mic.start()
+        if debug_path:
+            await asyncio.to_thread(
+                append_debug,
+                debug_path,
+                "voice.listening",
+                input=input_name,
+                threshold=round(config.threshold, 6),
+            )
         print(
             f"Ready—just speak. input={input_name!r} "
             f"threshold={config.threshold:.4f} Ctrl-C exits.",
             flush=True,
         )
         pending_audio = None
+        preview_task: asyncio.Task | None = None
+        last_preview = ""
+        asr_lock = asyncio.Lock()
+
+        async def preview(audio: np.ndarray) -> None:
+            nonlocal last_preview
+            async with asr_lock:
+                text = await asyncio.to_thread(transcribe, model, audio, args.language)
+            if text and text != last_preview:
+                last_preview = text
+                print(f"You[partial]: {text}", flush=True)
+                if debug_path:
+                    await asyncio.to_thread(
+                        append_debug, debug_path, "asr.partial", text=text
+                    )
+
+        def observe(event: AudioEvent) -> None:
+            nonlocal preview_task
+            if debug_path and event.kind in (
+                "speech.started",
+                "speech.confirmed",
+                "audio.warning",
+            ):
+                asyncio.create_task(
+                    asyncio.to_thread(append_debug, debug_path, event.kind)
+                )
+            if event.kind == "speech.preview" and event.audio is not None:
+                if preview_task is None or preview_task.done():
+                    preview_task = asyncio.create_task(preview(event.audio.copy()))
+
         try:
             while True:
-                audio = pending_audio if pending_audio is not None else await next_final(mic)
+                audio = (
+                    pending_audio
+                    if pending_audio is not None
+                    else await next_final(mic, on_event=observe)
+                )
                 pending_audio = None
                 started = time.monotonic()
                 asr_started = time.monotonic()
-                text = await asyncio.to_thread(transcribe, model, audio, args.language)
+                async with asr_lock:
+                    text = await asyncio.to_thread(
+                        transcribe, model, audio, args.language
+                    )
                 asr_seconds = time.monotonic() - asr_started
                 if not text:
                     continue
+                last_preview = text
+                if debug_path:
+                    await asyncio.to_thread(
+                        append_debug, debug_path, "asr.final", text=text
+                    )
                 if voice_control(text) == "stop":
                     print(f"You[control]: {text}\nStopping voice mode.", flush=True)
                     break
                 binding = await harness_router.resolve(text)
+                if debug_path:
+                    await asyncio.to_thread(
+                        append_debug,
+                        debug_path,
+                        "voice.routed",
+                        route=binding.key,
+                        session=binding.thread,
+                    )
                 print(
                     f"You[{binding.key} thread={binding.thread}]: {text}",
                     flush=True,
@@ -745,11 +927,16 @@ async def run(args) -> None:
                     speaker,
                 )
                 task = asyncio.create_task(turn.run(text, args.effort))
+                if debug_path:
+                    await asyncio.to_thread(
+                        append_debug, debug_path, "codex.thinking"
+                    )
                 listen_task = asyncio.create_task(
                     next_final(
                         mic,
                         turn,
                         interrupt_mode=args.barge_in,
+                        on_event=observe,
                     )
                 )
                 done, _ = await asyncio.wait(
@@ -759,6 +946,13 @@ async def run(args) -> None:
                     pending_audio = listen_task.result()
                     await turn.interrupt()
                 response = await task
+                if debug_path:
+                    await asyncio.to_thread(
+                        append_debug,
+                        debug_path,
+                        "voice.response",
+                        text=response,
+                    )
                 first_audio = (
                     speaker.first_play_at - started
                     if speaker.first_play_at is not None
@@ -814,6 +1008,10 @@ async def run(args) -> None:
                     listen_task.cancel()
         finally:
             mic.close()
+            if preview_task and not preview_task.done():
+                preview_task.cancel()
+    finally:
+        await server_context.__aexit__(None, None, None)
 
 
 def main() -> int:
@@ -889,6 +1087,16 @@ def main() -> int:
         "--metrics",
         type=Path,
         help="append one privacy-safe JSON latency record per completed turn",
+    )
+    parser.add_argument(
+        "--debug-events",
+        type=Path,
+        help="append live speech/ASR/routing lifecycle JSONL for dashboards",
+    )
+    parser.add_argument(
+        "--transcribe-only",
+        action="store_true",
+        help="keep live ASR/debug output running without attaching a Codex thread",
     )
     parser.add_argument(
         "--silence-ms",
