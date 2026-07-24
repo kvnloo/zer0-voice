@@ -89,6 +89,8 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("voice/candidate-service", RUNTIME_FILES)
         self.assertIn("voice/release.py", RUNTIME_FILES)
         self.assertIn("voice/test_health.py", RUNTIME_FILES)
+        self.assertIn("voice/turn_contract.py", RUNTIME_FILES)
+        self.assertIn("voice/test_turn_contract.py", RUNTIME_FILES)
         self.assertIn("voice/handoff.py", RUNTIME_FILES)
         self.assertIn("voice/test_handoff.py", RUNTIME_FILES)
         self.assertIn("voice/runtime_manager.py", RUNTIME_FILES)

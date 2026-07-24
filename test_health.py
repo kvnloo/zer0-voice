@@ -39,6 +39,9 @@ class HealthTests(unittest.TestCase):
         self.assertIs(snapshot["capture_expected"], False)
         self.assertEqual(snapshot["capture_frames"], 0)
         self.assertEqual(snapshot["capture_updated_ns"], 0)
+        self.assertEqual(snapshot["mic_mode"], "unknown")
+        self.assertEqual(snapshot["notification_mode"], "unknown")
+        self.assertIs(snapshot["capture_active"], False)
 
     def test_concurrent_heartbeats_are_atomic_and_never_collide(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -162,6 +165,21 @@ class HealthTests(unittest.TestCase):
         self.assertEqual(snapshot["capture_frames"], 960)
         self.assertGreater(snapshot["capture_updated_ns"], 0)
         self.assertNotIn("audio", json.dumps(snapshot))
+
+    def test_control_mode_is_explicit_and_transcript_free(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "health.json"
+            health = RuntimeHealth(path, "run-control")
+            health.control(
+                mic_mode="muted",
+                notification_mode="conversational",
+                capture_active=False,
+            )
+            snapshot = read_snapshot(path)
+        self.assertEqual(snapshot["mic_mode"], "muted")
+        self.assertEqual(snapshot["notification_mode"], "conversational")
+        self.assertIs(snapshot["capture_active"], False)
+        self.assertNotIn("text", json.dumps(snapshot))
 
     def test_cli_exit_status_matches_health(self):
         with tempfile.TemporaryDirectory() as directory:

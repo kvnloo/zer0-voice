@@ -44,6 +44,7 @@ from health import RuntimeHealth
 from indicator import VoiceState, make_indicator
 from lexicon import load_lexicon
 from modes import MicMode, NotificationMode, VoiceModes
+from turn_contract import require_audible_reply
 from preflight import preflight
 from providers import CodexSubscription, Provider
 from workspace_router import Route, WorkspaceRouter, load_routes
@@ -160,11 +161,19 @@ def schedule_pm_decision(
 async def monitor_control(
     control: VoiceControl,
     debug_path: Path | None,
+    health: RuntimeHealth | None = None,
 ) -> None:
     revision = -1
     while True:
         state = control.state if revision < 0 else await control.wait_after(revision)
         revision = state.revision
+        if health:
+            await asyncio.to_thread(
+                health.control,
+                mic_mode=state.modes.mic.value,
+                notification_mode=state.modes.notifications.value,
+                capture_active=state.capture_active,
+            )
         if debug_path:
             await asyncio.to_thread(
                 append_debug,
@@ -1499,7 +1508,9 @@ async def run(args) -> None:
     )
     control_server = ControlServer(args.control_socket, control)
     debug_path = args.debug_events
-    control_monitor = asyncio.create_task(monitor_control(control, debug_path))
+    control_monitor = asyncio.create_task(
+        monitor_control(control, debug_path, health)
+    )
     if args.transcribe_only:
         try:
             await control_server.start()
@@ -1972,6 +1983,11 @@ async def run(args) -> None:
                             ),
                         )
                         owned_capture = None
+                    if response is not None:
+                        require_audible_reply(
+                            response,
+                            speaker.first_play_at is not None,
+                        )
                 except (
                     AppServerError,
                     OSError,

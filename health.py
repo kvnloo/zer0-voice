@@ -87,6 +87,9 @@ class RuntimeHealth:
     capture_expected: bool = False
     capture_frames: int = 0
     capture_updated_ns: int = 0
+    mic_mode: str = "unknown"
+    notification_mode: str = "unknown"
+    capture_active: bool = False
     _lock: threading.Lock = field(
         default_factory=threading.Lock,
         init=False,
@@ -133,6 +136,20 @@ class RuntimeHealth:
             self.capture_frames += frames
             self.capture_updated_ns = time.time_ns()
 
+    def control(
+        self,
+        *,
+        mic_mode: str,
+        notification_mode: str,
+        capture_active: bool,
+    ) -> None:
+        """Publish operator mode independently from transient worker phase."""
+        with self._lock:
+            self.mic_mode = mic_mode
+            self.notification_mode = notification_mode
+            self.capture_active = capture_active
+            self._touch_unlocked()
+
     def _touch_unlocked(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         snapshot = {
@@ -145,6 +162,9 @@ class RuntimeHealth:
             "capture_expected": self.capture_expected,
             "capture_frames": self.capture_frames,
             "capture_updated_ns": self.capture_updated_ns,
+            "mic_mode": self.mic_mode,
+            "notification_mode": self.notification_mode,
+            "capture_active": self.capture_active,
             "phase_since_ns": self.phase_since_ns,
             "updated_ns": time.time_ns(),
             "revision": self.revision,
@@ -201,6 +221,8 @@ def main() -> int:
                 "lane": snapshot.get("lane", "runtime"),
                 "pid": snapshot.get("pid"),
                 "run_id": snapshot.get("run_id"),
+                "mic_mode": snapshot.get("mic_mode", "unknown"),
+                "capture_active": snapshot.get("capture_active", False),
             },
             separators=(",", ":"),
             sort_keys=True,
