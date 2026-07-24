@@ -203,6 +203,7 @@ STAGED_BUNDLE/voice/shadow-real \
 # Then run the physical candidate and collect ten real continuous turns.
 # Only voice/canary.py's codex-continuous-pcm-v5 report can authorize release.
 PYTHONPATH=voice python voice/canary.py \
+  --bundle-sha256 BUNDLE_SHA \
   --metrics bench/voice-history.jsonl \
   --debug "${XDG_STATE_HOME:-$HOME/.local/state}/zer0-voice/voice-debug.jsonl" \
   --health "${XDG_STATE_HOME:-$HOME/.local/state}/zer0-voice/health.json" \

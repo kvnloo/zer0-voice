@@ -33,6 +33,7 @@ def canary(digest: str, verdict: str = "promote", turns: int = 10):
     report = {
         "schema": 1,
         "pipeline": "codex-continuous-pcm-v5",
+        "bundle_sha256": digest,
         "status": "passed" if verdict == "promote" else "collecting",
         "promotion": {
             "eligible": verdict == "promote",
@@ -244,6 +245,22 @@ class ReleaseTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(ReleaseError, "physical continuous-voice"):
             verdict_from_canary(report, "0" * 64)
+
+    def test_physical_report_from_another_bundle_cannot_authorize(self):
+        report = {
+            "schema": 1,
+            "pipeline": "codex-continuous-pcm-v5",
+            "bundle_sha256": "1" * 64,
+            "status": "passed",
+            "promotion": {
+                "eligible": True,
+                "verdict": "promote",
+                "observed_completed_turns": 10,
+            },
+            "counts": {"empty_model_outputs": 0},
+        }
+        with self.assertRaisesRegex(ReleaseError, "another bundle"):
+            verdict_from_canary(report, "2" * 64)
 
     def test_service_delegates_generation_execution_to_stable_manager(self):
         script = Path(__file__).with_name("service").read_text(encoding="utf-8")

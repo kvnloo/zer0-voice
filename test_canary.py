@@ -327,6 +327,35 @@ class CanaryTests(unittest.TestCase):
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["health"]["reason"], "heartbeat-run-mismatch")
 
+    def test_requested_bundle_must_match_current_runtime_generation(self):
+        now_ns = 20_000_000_000
+        events = [
+            {
+                "kind": "voice.starting",
+                "bundle_sha256": "1" * 64,
+                "ts_ns": 1,
+            }
+        ]
+        for index in range(10):
+            events.extend(
+                cycle(
+                    1_000_000_000 + index * 1_000_000_000,
+                    f"turn {index}",
+                )
+            )
+        result = audit(
+            [
+                metric(ts_ns=1_000_000_000 + index * 1_000_000_000)
+                for index in range(10)
+            ],
+            events,
+            now_ns=now_ns,
+            health=healthy(now_ns),
+            bundle_sha256="2" * 64,
+        )
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("runtime bundle does not match", result["invariants"][0])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -284,6 +284,8 @@ def verdict_from_canary(canary: dict[str, Any], digest: str) -> dict[str, Any]:
         raise ReleaseError(
             "promotion requires the physical continuous-voice pipeline"
         )
+    if verdict == "promote" and canary.get("bundle_sha256") != digest:
+        raise ReleaseError("physical canary is bound to another bundle")
     return {
         "schema": SCHEMA,
         "bundle_sha256": digest,

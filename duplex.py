@@ -1510,6 +1510,7 @@ async def run(args) -> None:
             "voice.starting",
             session=args.session or "",
             run_id=run_id,
+            bundle_sha256=args.release_bundle,
         )
     try:
         if health:
@@ -2162,6 +2163,11 @@ def main() -> int:
     parser.add_argument(
         "--session",
         help="existing Codex harness thread; defaults to CODEX_THREAD_ID",
+    )
+    parser.add_argument(
+        "--release-bundle",
+        default=os.environ.get("ZERO_VOICE_BUNDLE_SHA256"),
+        help="immutable release digest recorded in privacy-safe canary events",
     )
     parser.add_argument(
         "--app-server",

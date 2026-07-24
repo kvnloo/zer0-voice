@@ -119,6 +119,8 @@ class RuntimeManager:
             str(bundle / "voice/duplex"),
             "--session",
             self.args.thread,
+            "--release-bundle",
+            bundle.name,
             "--cwd",
             str(self.args.root),
             "--app-server",

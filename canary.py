@@ -188,6 +188,7 @@ def audit(
     duplicate_window_seconds: float = DEFAULT_DUPLICATE_WINDOW_SECONDS,
     max_interruptions: int = DEFAULT_MAX_INTERRUPTION_COUNT,
     max_errors: int = DEFAULT_MAX_ERROR_COUNT,
+    bundle_sha256: str | None = None,
 ) -> dict[str, Any]:
     required_samples = max(minimum_samples, MINIMUM_PROMOTION_TURNS)
     run = current_run(events)
@@ -196,6 +197,15 @@ def audit(
             str(event["run_id"])
             for event in run
             if event.get("kind") == "voice.starting" and event.get("run_id")
+        ),
+        None,
+    )
+    run_bundle = next(
+        (
+            str(event["bundle_sha256"])
+            for event in run
+            if event.get("kind") == "voice.starting"
+            and event.get("bundle_sha256")
         ),
         None,
     )
@@ -267,6 +277,8 @@ def audit(
         )
     if counts["errors"] > max_errors:
         invariants.append(f"errors {counts['errors']} > allowed {max_errors}")
+    if bundle_sha256 and run_bundle != bundle_sha256:
+        invariants.append("runtime bundle does not match requested candidate")
 
     health_snapshot = health or {}
     health_ok, health_reason = assess_health(
@@ -293,6 +305,7 @@ def audit(
     return {
         "schema": 1,
         "pipeline": PRODUCTION_PIPELINE,
+        "bundle_sha256": run_bundle,
         "run_id": run_id,
         "status": status,
         "start_ns": start_ns,
@@ -359,6 +372,11 @@ def main() -> int:
         default=user_state / "zer0-voice/health.json",
     )
     parser.add_argument(
+        "--bundle-sha256",
+        required=True,
+        help="exact staged bundle expected in the current worker generation",
+    )
+    parser.add_argument(
         "--start-ns",
         type=int,
         help="evaluate only metrics/events at or after this timestamp",
@@ -400,6 +418,7 @@ def main() -> int:
         duplicate_window_seconds=args.duplicate_window,
         max_interruptions=args.max_interruptions,
         max_errors=args.max_errors,
+        bundle_sha256=args.bundle_sha256,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return {"passed": 0, "failed": 1}.get(result["status"], 2)
