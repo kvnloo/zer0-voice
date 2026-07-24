@@ -385,13 +385,40 @@ class LiveTurn:
         self.speaker.interrupt()
 
 
+class SpokenTextTurn:
+    def __init__(self, speaker: Speaker, text: str):
+        self.speaker = speaker
+        self.text = text
+
+    async def run(self) -> None:
+        await self.speaker.say(self.text)
+
+    async def interrupt(self) -> None:
+        self.speaker.interrupt()
+
+
+class InterruptSlot:
+    """Mutable target lets one microphone listener follow changing speakers."""
+
+    def __init__(self, target=None):
+        self.target = target
+
+    async def interrupt(self) -> None:
+        if self.target is not None:
+            await self.target.interrupt()
+
+
+def should_speak_followup(text: str) -> bool:
+    return bool(text.strip()) and text.strip().upper() != "NO_FOLLOWUP"
+
+
 class DeepWorker:
     """Sequential persistent Codex lane that enriches future live turns."""
 
     def __init__(self, server: CodexAppServer):
         self.server = server
         self.queue: asyncio.Queue[
-            tuple[str, str, str, tuple[str, ...]] | None
+            tuple[str, str, str, tuple[str, ...], asyncio.Future[str]] | None
         ] = asyncio.Queue()
         self.insights: dict[str, deque[str]] = defaultdict(
             lambda: deque(maxlen=8)
@@ -403,29 +430,44 @@ class DeepWorker:
         thread: str,
         text: str,
         context: tuple[str, ...],
-    ) -> None:
-        self.queue.put_nowait((route_key, thread, text, context))
+    ) -> asyncio.Future[str]:
+        future = asyncio.get_running_loop().create_future()
+        future.add_done_callback(
+            lambda completed: (
+                completed.exception() if not completed.cancelled() else None
+            )
+        )
+        self.queue.put_nowait((route_key, thread, text, context, future))
+        return future
 
     async def run(self) -> None:
         while item := await self.queue.get():
-            route_key, thread, text, context = item
+            route_key, thread, text, context, future = item
             prompt = (
-                "Analyze the latest live conversation turn. Do useful tool work when "
-                "appropriate. Return a compact verified result or correction that the "
+                "Analyze the latest live conversation turn. For greetings, acknowledgments, "
+                "small talk, or anything the fast live lane can answer safely, return exactly "
+                "NO_FOLLOWUP. Otherwise do useful tool work when appropriate and return a "
+                "compact, naturally spoken verified result or correction that the "
                 f"live lane should know next. This turn belongs to route {route_key!r}; "
                 "keep all actions and assumptions scoped to that harness.\n\n"
                 f"Context:\n{chr(10).join(context)}\n\nLatest user: {text}"
             )
-            response = []
-            async for event in self.server.stream_turn(
-                thread, prompt, effort="medium"
-            ):
-                if event.kind == "assistant.delta":
-                    response.append(str(event.payload["text"]))
-            insight = "".join(response).strip()
-            if insight:
-                self.insights[route_key].append(insight)
-                print(f"Deep[{route_key}]: {insight}", flush=True)
+            try:
+                response = []
+                async for event in self.server.stream_turn(
+                    thread, prompt, effort="medium"
+                ):
+                    if event.kind == "assistant.delta":
+                        response.append(str(event.payload["text"]))
+                insight = "".join(response).strip()
+                if should_speak_followup(insight):
+                    self.insights[route_key].append(insight)
+                    print(f"Deep[{route_key}]: {insight}", flush=True)
+                if not future.done():
+                    future.set_result(insight)
+            except Exception as exc:
+                if not future.done():
+                    future.set_exception(exc)
 
 
 @dataclass(frozen=True, slots=True)
@@ -629,7 +671,7 @@ class HarnessRouter:
 
 async def next_final(
     mic: Microphone,
-    turn: DuplexTurn | LiveTurn | None = None,
+    turn: DuplexTurn | LiveTurn | SpokenTextTurn | InterruptSlot | None = None,
     *,
     interrupt_mode: str = "final",
 ) -> np.ndarray:
@@ -777,7 +819,12 @@ async def run(args) -> None:
                 context = (route_note,) + harness_context + tuple(history) + tuple(
                     f"deep: {x}" for x in deep.insights[binding.key]
                 )
-                deep.submit(binding.key, binding.thread, text, context)
+                deep_future = deep.submit(
+                    binding.key,
+                    binding.thread,
+                    text,
+                    context,
+                )
                 speaker = Speaker(
                     args.kokoro_url,
                     args.voice,
@@ -786,11 +833,12 @@ async def run(args) -> None:
                     latency=args.playback_latency,
                 )
                 turn = LiveTurn(live, speaker, context)
+                interrupt_slot = InterruptSlot(turn)
                 task = asyncio.create_task(turn.run(text))
                 listen_task = asyncio.create_task(
                     next_final(
                         mic,
-                        turn,
+                        interrupt_slot,
                         interrupt_mode=args.barge_in,
                     )
                 )
@@ -801,7 +849,7 @@ async def run(args) -> None:
                     pending_audio = listen_task.result()
                     await turn.interrupt()
                 else:
-                    listen_task.cancel()
+                    interrupt_slot.target = None
                 response = await task
                 history.extend((f"user: {text}", f"assistant: {response}"))
                 first_audio = (
@@ -854,6 +902,58 @@ async def run(args) -> None:
                             "interrupted": pending_audio is not None,
                         },
                     )
+                if pending_audio is None and not listen_task.done():
+                    async def wait_deep() -> str:
+                        return await asyncio.wait_for(
+                            asyncio.shield(deep_future),
+                            timeout=args.deep_followup_wait,
+                        )
+
+                    deep_wait = asyncio.create_task(wait_deep())
+                    follow_done, _ = await asyncio.wait(
+                        (listen_task, deep_wait),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if listen_task in follow_done:
+                        pending_audio = listen_task.result()
+                        deep_wait.cancel()
+                    else:
+                        try:
+                            insight = deep_wait.result()
+                        except TimeoutError:
+                            insight = ""
+                        except Exception as exc:
+                            print(f"Deep follow-up failed: {exc}", flush=True)
+                            insight = ""
+                        if should_speak_followup(insight):
+                            follow_speaker = Speaker(
+                                args.kokoro_url,
+                                args.voice,
+                                backend=args.playback,
+                                output=args.output,
+                                latency=args.playback_latency,
+                            )
+                            followup = SpokenTextTurn(follow_speaker, insight)
+                            interrupt_slot.target = followup
+                            follow_task = asyncio.create_task(followup.run())
+                            follow_done, _ = await asyncio.wait(
+                                (listen_task, follow_task),
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                            if listen_task in follow_done:
+                                pending_audio = listen_task.result()
+                                await followup.interrupt()
+                                await asyncio.gather(
+                                    follow_task,
+                                    return_exceptions=True,
+                                )
+                            else:
+                                interrupt_slot.target = None
+                                listen_task.cancel()
+                        else:
+                            listen_task.cancel()
+                elif not listen_task.done():
+                    listen_task.cancel()
         finally:
             deep.queue.put_nowait(None)
             await deep_task
@@ -871,6 +971,12 @@ def main() -> int:
     parser.add_argument("--kokoro-url", default="http://127.0.0.1:8880")
     parser.add_argument("--session", help="resume this Codex thread for the deep lane")
     parser.add_argument("--session-timeout", type=float, default=8.0)
+    parser.add_argument(
+        "--deep-followup-wait",
+        type=float,
+        default=15.0,
+        help="maximum idle wait for a same-turn smart-lane follow-up",
+    )
     parser.add_argument(
         "--workspace-routing",
         action=argparse.BooleanOptionalAction,

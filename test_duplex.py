@@ -17,6 +17,7 @@ from duplex import (
     adaptive_threshold,
     append_metric,
     next_final,
+    should_speak_followup,
     voice_control,
 )
 
@@ -120,6 +121,11 @@ class DuplexTests(unittest.TestCase):
             "do not stop",
         ):
             self.assertIsNone(voice_control(phrase))
+
+    def test_deep_followup_disposition_is_deterministic(self):
+        self.assertFalse(should_speak_followup(""))
+        self.assertFalse(should_speak_followup(" NO_FOLLOWUP "))
+        self.assertTrue(should_speak_followup("The verified build passed."))
 
     @patch("duplex.subprocess.Popen")
     def test_pipewire_player_streams_wav_to_explicit_sink(self, popen):
