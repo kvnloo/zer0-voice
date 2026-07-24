@@ -1,0 +1,91 @@
+#!/bin/sh
+set -eu
+
+ROOT=${ZERO_MAXINE_ROOT:-/workspace/zer0/products/pm}
+CONFIG=${ZERO_MAXINE_AEC_CONFIG:-"$ROOT/voice/pipewire/maxine-aec-filter-chain.conf"}
+NEAR_OUT=${ZERO_MAXINE_NEAR_PORT:-alsa_input.usb-BLUE_MICROPHONE_Blue_Snowball_797_2020_11_17_99419-00.mono-fallback:capture_MONO}
+NEAR_IN=${ZERO_MAXINE_NEAR_INPUT:-capture.zer0_maxine_aec:input_FL}
+FAR_OUT=${ZERO_MAXINE_FAR_PORT:-effect_input.aural_evolution:monitor_FL}
+FAR_IN=${ZERO_MAXINE_FAR_INPUT:-capture.zer0_maxine_aec:input_FR}
+LINK_INTERVAL=${ZERO_MAXINE_LINK_INTERVAL:-1}
+PIPEWIRE_BIN=${ZERO_MAXINE_PIPEWIRE_BIN:-/usr/bin/pipewire}
+PW_LINK_BIN=${ZERO_MAXINE_PW_LINK_BIN:-pw-link}
+PROBE=${ZERO_MAXINE_PROBE:-"$ROOT/voice/pipewire/capture_probe.py"}
+PROBE_DEVICE=${ZERO_MAXINE_PROBE_DEVICE:-zer0_maxine_full}
+PROBE_TIMEOUT=${ZERO_MAXINE_PROBE_TIMEOUT:-2}
+PROBE_INTERVAL=${ZERO_MAXINE_PROBE_INTERVAL:-5}
+RECOVER_SOURCE=${ZERO_MAXINE_RECOVER_SOURCE:-${NEAR_OUT%:*}}
+PACTL_BIN=${ZERO_MAXINE_PACTL_BIN:-pactl}
+
+child=
+supervisor=
+cleanup() {
+    if [ -n "$supervisor" ] && kill -0 "$supervisor" 2>/dev/null; then
+        kill "$supervisor" 2>/dev/null || true
+        wait "$supervisor" 2>/dev/null || true
+    fi
+    if [ -n "$child" ] && kill -0 "$child" 2>/dev/null; then
+        kill "$child" 2>/dev/null || true
+        i=0
+        while kill -0 "$child" 2>/dev/null && [ "$i" -lt 20 ]; do
+            i=$((i + 1))
+            sleep 0.05
+        done
+        if kill -0 "$child" 2>/dev/null; then
+            kill -KILL "$child" 2>/dev/null || true
+        fi
+        wait "$child" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT HUP INT TERM
+
+"$PIPEWIRE_BIN" -c "$CONFIG" &
+child=$!
+
+i=0
+while [ "$i" -lt 100 ]; do
+    if ! kill -0 "$child" 2>/dev/null; then
+        wait "$child"
+        exit $?
+    fi
+    if "$PW_LINK_BIN" -i 2>/dev/null | grep -Fxq "$NEAR_IN" &&
+       "$PW_LINK_BIN" -i 2>/dev/null | grep -Fxq "$FAR_IN"; then
+        break
+    fi
+    i=$((i + 1))
+    sleep 0.1
+done
+
+if [ "$i" -eq 100 ]; then
+    echo "maxine-aec: PipeWire input ports did not appear" >&2
+    exit 1
+fi
+
+supervise() {
+    while kill -0 "$child" 2>/dev/null; do
+        # pw-link is idempotent at the graph level: an existing link returns an
+        # error, while a missing link is restored immediately.
+        "$PW_LINK_BIN" "$NEAR_OUT" "$NEAR_IN" 2>/dev/null || true
+        "$PW_LINK_BIN" "$FAR_OUT" "$FAR_IN" 2>/dev/null || true
+        if ! python3 "$PROBE" "$PROBE_DEVICE" --timeout "$PROBE_TIMEOUT"; then
+            # A PipeWire restart can leave a USB source logically RUNNING while
+            # its clock delivers no frames. Reset only the upstream mic node;
+            # do not bounce the server or unrelated sinks.
+            "$PACTL_BIN" suspend-source "$RECOVER_SOURCE" 1 2>/dev/null || true
+            sleep 0.1
+            "$PACTL_BIN" suspend-source "$RECOVER_SOURCE" 0 2>/dev/null || true
+            echo "maxine-aec: capture stopped making progress" >&2
+            kill "$child" 2>/dev/null || true
+            return 2
+        fi
+        sleep "$PROBE_INTERVAL"
+    done
+}
+
+supervise &
+supervisor=$!
+status=0
+wait "$child" || status=$?
+wait "$supervisor" 2>/dev/null || true
+supervisor=
+exit "$status"

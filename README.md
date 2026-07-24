@@ -390,3 +390,24 @@ proposal, ranks urgent/confident interventions, and bounds deliberation rounds
 to prevent recursive agent chatter. The live voice lane consumes this board
 while speaking, so smarter results can revise it without becoming a latency
 gate.
+
+## NVIDIA microphone filters
+
+`pipewire/maxine-stable-filter-chain.conf` is the conservative production
+filter: one physical capture clock feeds the installed NVIDIA denoise and
+dereverb plugin. `pipewire/maxine-full-filter-chain.conf` is an experimental
+two-input lane that feeds microphone and playback-reference audio through the
+local Maxine AEC LADSPA adapter before denoising.
+
+Neither lane changes the default PipeWire source. Build and inspect the AEC
+adapter without opening a microphone:
+
+```sh
+make -C voice/maxine_aec
+make -C voice/maxine_aec inspect
+```
+
+The supervisors fail closed if their source does not appear or stops emitting
+frames. Their probe reads only enough data to prove progress and retains no
+microphone audio. Do not install or enable a user service until the named
+physical source exists and a ten-turn physical voice cohort passes.

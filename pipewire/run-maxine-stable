@@ -1,0 +1,80 @@
+#!/bin/sh
+set -eu
+
+ROOT=${ZERO_MAXINE_ROOT:-/workspace/zer0/products/pm}
+CONFIG=${ZERO_MAXINE_CONFIG:-"$ROOT/voice/pipewire/maxine-stable-filter-chain.conf"}
+SOURCE=${ZERO_MAXINE_SOURCE:-zer0_maxine_full}
+UPSTREAM=${ZERO_MAXINE_UPSTREAM:-alsa_input.usb-BLUE_MICROPHONE_Blue_Snowball_797_2020_11_17_99419-00.mono-fallback}
+PROBE=${ZERO_MAXINE_PROBE:-"$ROOT/voice/pipewire/capture_probe.py"}
+PROBE_TIMEOUT=${ZERO_MAXINE_PROBE_TIMEOUT:-2}
+PROBE_INTERVAL=${ZERO_MAXINE_PROBE_INTERVAL:-5}
+PIPEWIRE_BIN=${ZERO_MAXINE_PIPEWIRE_BIN:-/usr/bin/pipewire}
+PACTL_BIN=${ZERO_MAXINE_PACTL_BIN:-pactl}
+
+child=
+supervisor=
+cleanup() {
+    if [ -n "$supervisor" ] && kill -0 "$supervisor" 2>/dev/null; then
+        kill "$supervisor" 2>/dev/null || true
+        wait "$supervisor" 2>/dev/null || true
+    fi
+    if [ -z "$child" ] || ! kill -0 "$child" 2>/dev/null; then
+        return
+    fi
+    kill "$child" 2>/dev/null || true
+    i=0
+    while kill -0 "$child" 2>/dev/null && [ "$i" -lt 20 ]; do
+        i=$((i + 1))
+        sleep 0.05
+    done
+    if kill -0 "$child" 2>/dev/null; then
+        kill -KILL "$child" 2>/dev/null || true
+    fi
+    wait "$child" 2>/dev/null || true
+}
+trap cleanup EXIT HUP INT TERM
+
+"$PIPEWIRE_BIN" -c "$CONFIG" &
+child=$!
+
+# Give the session manager a bounded window to expose and link the source.
+i=0
+while [ "$i" -lt 100 ]; do
+    if ! kill -0 "$child" 2>/dev/null; then
+        wait "$child"
+        exit $?
+    fi
+    if "$PACTL_BIN" list short sources 2>/dev/null |
+        awk '{print $2}' |
+        grep -Fxq "$SOURCE"; then
+        break
+    fi
+    i=$((i + 1))
+    sleep 0.1
+done
+if [ "$i" -eq 100 ]; then
+    echo "maxine-stable: source did not appear" >&2
+    exit 1
+fi
+
+supervise() {
+    while kill -0 "$child" 2>/dev/null; do
+        if ! python3 "$PROBE" "$SOURCE" --timeout "$PROBE_TIMEOUT"; then
+            "$PACTL_BIN" suspend-source "$UPSTREAM" 1 2>/dev/null || true
+            sleep 0.1
+            "$PACTL_BIN" suspend-source "$UPSTREAM" 0 2>/dev/null || true
+            echo "maxine-stable: capture stopped making progress" >&2
+            kill "$child" 2>/dev/null || true
+            return 2
+        fi
+        sleep "$PROBE_INTERVAL"
+    done
+}
+
+supervise &
+supervisor=$!
+status=0
+wait "$child" || status=$?
+wait "$supervisor" 2>/dev/null || true
+supervisor=
+exit "$status"
