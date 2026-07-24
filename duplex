@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+export LD_LIBRARY_PATH="/workspace/kokoro-tts/.venv/lib/python3.12/site-packages/nvidia/cublas/lib:/workspace/kokoro-tts/.venv/lib/python3.12/site-packages/nvidia/cudnn/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec /workspace/whisper/.venv/bin/python "$(dirname "$0")/duplex.py" "$@"

@@ -59,9 +59,35 @@ important or safety-critical thought. Its adaptive endpoint tolerates reflective
 pauses instead of treating every silence as the end of a turn.
 
 The simple `conversation` executable still speaks after a Codex turn completes.
-The production loop will drive the same adapters through Codex app-server
-message deltas, streaming Kokoro playback, echo cancellation, and the floor
-policy rather than waiting for completed turns.
+`duplex` is the production local loop: it keeps the microphone open while Codex
+and Kokoro speak, streams authenticated Codex app-server deltas into sentence
+sized Kokoro chunks, stops output on speech-start, interrupts the active Codex
+turn, endpoints the user's interruption, and immediately continues on the same
+thread.
+
+```sh
+./voice/duplex --cwd /workspace/zer0/products/pm
+```
+
+The launcher supplies the CUDA 12 libraries already installed with the global
+Kokoro environment, allowing Faster Whisper `small.en` to run on the GPU without
+duplicating those packages.
+
+By default, each completed utterance resolves the privacy-filtered
+`workspace-copilot` context and snapshots its focused tmux harness as the owner
+of that turn. Switching windows does not redirect an answer that is already
+speaking. If the user interrupts, the pending utterance resolves focus again and
+can route to the newly focused harness. Each routed project has isolated live
+history and deep insights, and its newest interactive Codex thread is resumed
+when available.
+
+Project paths are configured in `voice/routes.json`. Disable routing with
+`--no-workspace-routing`, or pin the deep lane with `--session THREAD_ID`.
+Routing fails closed to the launch-context thread when the sanitized workspace
+sensor reports multiple active harness windows without a focused tmux pane.
+Full window-to-window switching therefore requires `workspace-copilot` context
+to expose either `tmux_focus.pane_id` or an `active` bit on the displayed tmux
+window; raw pane contents and window titles are never inspected.
 
 `fleet.py` implements the parallel intelligence hierarchy. The default profile
 is five total lanes: one live voice generator plus instant, medium, high, and

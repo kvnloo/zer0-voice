@@ -1,0 +1,8 @@
+{
+  "projects": {
+    "pm": "/workspace/zer0/products/pm",
+    "zerOS": "/workspace/zer0/products/zerOS",
+    "flowkit": "/workspace/zer0/products/flowkit",
+    ".files": "/workspace/.files"
+  }
+}

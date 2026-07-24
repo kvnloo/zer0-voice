@@ -94,7 +94,7 @@ class OllamaLiveLane:
 
     def __init__(
         self,
-        model: str = "qwen2.5-coder:7b",
+        model: str = "qwen2.5:3b",
         url: str = "http://127.0.0.1:11434/api/chat",
     ):
         self.model = model
@@ -113,12 +113,18 @@ class OllamaLiveLane:
         ]
         for item in context:
             role, _, content = item.partition(": ")
-            messages.append(
-                {"role": "assistant" if role == "assistant" else "user", "content": content}
-            )
+            if role not in {"system", "assistant", "user"}:
+                role = "user"
+            messages.append({"role": role, "content": content})
         messages.append({"role": "user", "content": text})
         body = json.dumps(
-            {"model": self.model, "messages": messages, "stream": True}
+            {
+                "model": self.model,
+                "messages": messages,
+                "stream": True,
+                "keep_alive": "30m",
+                "options": {"num_predict": 96},
+            }
         ).encode()
         return urllib.request.urlopen(
             urllib.request.Request(
