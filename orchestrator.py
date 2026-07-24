@@ -6,6 +6,7 @@ import asyncio
 import json
 import subprocess
 import time
+import urllib.error
 import urllib.request
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -139,20 +140,31 @@ class OllamaLiveLane:
     async def stream(
         self, text: str, context: tuple[str, ...]
     ) -> AsyncIterator[str]:
-        response = await asyncio.to_thread(self._request, text, context)
-        try:
-            while True:
-                line = await asyncio.to_thread(response.readline)
-                if not line:
-                    break
-                payload = json.loads(line)
-                delta = payload.get("message", {}).get("content", "")
-                if delta:
-                    yield delta
-                if payload.get("done"):
-                    break
-        finally:
-            response.close()
+        emitted = False
+        for attempt in range(3):
+            response = None
+            try:
+                response = await asyncio.to_thread(self._request, text, context)
+                while True:
+                    line = await asyncio.to_thread(response.readline)
+                    if not line:
+                        break
+                    payload = json.loads(line)
+                    delta = payload.get("message", {}).get("content", "")
+                    if delta:
+                        emitted = True
+                        yield delta
+                    if payload.get("done"):
+                        return
+                if emitted:
+                    return
+            except (OSError, urllib.error.URLError):
+                if emitted or attempt == 2:
+                    raise
+                await asyncio.sleep(0.25 * (2**attempt))
+            finally:
+                if response is not None:
+                    response.close()
 
 
 class CodexReasoningLane:
