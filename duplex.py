@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import re
 import subprocess
 import sys
@@ -33,6 +34,12 @@ from workspace_router import Route, WorkspaceRouter, load_routes
 class AudioEvent:
     kind: str
     audio: np.ndarray | None = None
+
+
+def append_metric(path: Path, metric: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as output:
+        output.write(json.dumps(metric, separators=(",", ":"), sort_keys=True) + "\n")
 
 
 class UtteranceDetector:
@@ -640,6 +647,38 @@ async def run(args) -> None:
                     f"total={time.monotonic() - started:.2f}s",
                     flush=True,
                 )
+                if args.metrics:
+                    await asyncio.to_thread(
+                        append_metric,
+                        args.metrics,
+                        {
+                            "schema": 1,
+                            "recorded_at_ns": time.time_ns(),
+                            "route": binding.key,
+                            "routing_reason": binding.reason,
+                            "asr_seconds": round(asr_seconds, 6),
+                            "tts_first_seconds": (
+                                round(speaker.first_synthesis_seconds, 6)
+                                if speaker.first_synthesis_seconds is not None
+                                else None
+                            ),
+                            "audio_onset_after_endpoint_seconds": (
+                                round(first_audio, 6)
+                                if first_audio is not None
+                                else None
+                            ),
+                            "estimated_audio_onset_after_user_stop_seconds": (
+                                round(first_audio + config.silence_ms / 1000, 6)
+                                if first_audio is not None
+                                else None
+                            ),
+                            "total_seconds": round(
+                                time.monotonic() - started,
+                                6,
+                            ),
+                            "interrupted": pending_audio is not None,
+                        },
+                    )
         finally:
             deep.queue.put_nowait(None)
             await deep_task
@@ -697,6 +736,11 @@ def main() -> int:
         help="fixed VAD RMS threshold; default calibrates from ambient sound",
     )
     parser.add_argument("--calibration-seconds", type=float, default=1.0)
+    parser.add_argument(
+        "--metrics",
+        type=Path,
+        help="append one privacy-safe JSON latency record per completed turn",
+    )
     parser.add_argument("--silence-ms", type=int, default=520)
     args = parser.parse_args()
     try:

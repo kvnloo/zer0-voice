@@ -1,6 +1,9 @@
 import asyncio
+import json
 import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
@@ -12,6 +15,7 @@ from duplex import (
     Speaker,
     UtteranceDetector,
     adaptive_threshold,
+    append_metric,
     next_final,
 )
 
@@ -46,6 +50,14 @@ class DuplexTests(unittest.TestCase):
         self.assertEqual(adaptive_threshold(np.full(10, 0.0001)), 0.004)
         self.assertAlmostEqual(adaptive_threshold(np.full(10, 0.003)), 0.009)
         self.assertEqual(adaptive_threshold(np.full(10, 0.2)), 0.03)
+
+    def test_metric_ledger_is_append_only_jsonl(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "voice.jsonl"
+            append_metric(path, {"schema": 1, "route": "pm", "total_seconds": 1.5})
+            append_metric(path, {"schema": 1, "route": "zerOS", "total_seconds": 2.0})
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+        self.assertEqual([row["route"] for row in rows], ["pm", "zerOS"])
 
     @patch("duplex.subprocess.Popen")
     def test_pipewire_player_streams_wav_to_explicit_sink(self, popen):
