@@ -93,6 +93,21 @@ When focus is ambiguous, routing remains hands-free: say `switch to zerOS`,
 `talk to PM`, `route to Flowkit`, or `talk to dotfiles` to pin subsequent
 turns. Say `follow focus` to return to automatic workspace routing.
 
+## Performance ledger
+
+Pass `--metrics bench/voice-history.jsonl` to append one privacy-safe latency
+record per turn. Records contain routing disposition and stage timings, never
+transcript text or audio. Verify the current ledger with:
+
+```sh
+python voice/verify_metrics.py
+```
+
+The initial median budgets are 500 ms for ASR, 500 ms for first TTS synthesis,
+2.5 seconds from endpoint to first audio, and 3 seconds estimated from the
+user's last voiced block to first audio. Interrupted turns remain visible in
+the ledger but do not poison latency comparisons.
+
 `fleet.py` implements the parallel intelligence hierarchy. The default profile
 is five total lanes: one live voice generator plus instant, medium, high, and
 pro reasoning lanes. Instant and medium run every turn; high and pro use a
