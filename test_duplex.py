@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -11,13 +12,13 @@ import numpy as np
 from conversation import ListenConfig
 from duplex import (
     AudioEvent,
+    DuplexTurn,
     SentenceChunker,
     Speaker,
     UtteranceDetector,
     adaptive_threshold,
     append_metric,
     next_final,
-    should_speak_followup,
     voice_control,
 )
 
@@ -122,11 +123,6 @@ class DuplexTests(unittest.TestCase):
         ):
             self.assertIsNone(voice_control(phrase))
 
-    def test_deep_followup_disposition_is_deterministic(self):
-        self.assertFalse(should_speak_followup(""))
-        self.assertFalse(should_speak_followup(" NO_FOLLOWUP "))
-        self.assertTrue(should_speak_followup("The verified build passed."))
-
     @patch("duplex.subprocess.Popen")
     def test_pipewire_player_streams_wav_to_explicit_sink(self, popen):
         process = popen.return_value
@@ -154,8 +150,102 @@ class DuplexTests(unittest.TestCase):
         )
         process.communicate.assert_called_once_with(b"RIFFwav")
 
+    @patch("duplex.urllib.request.urlopen")
+    @patch("duplex.subprocess.Popen")
+    def test_pipewire_tts_streams_raw_pcm_before_response_finishes(
+        self,
+        popen,
+        urlopen,
+    ):
+        class Sink:
+            def __init__(self):
+                self.chunks = []
+
+            def write(self, chunk):
+                self.chunks.append(chunk)
+
+            def flush(self):
+                pass
+
+            def close(self):
+                pass
+
+        class Response:
+            def __init__(self):
+                self.chunks = [b"first", b"second", b""]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                pass
+
+            def read(self, _size):
+                return self.chunks.pop(0)
+
+        process = popen.return_value
+        process.stdin = Sink()
+        process.stderr.read.return_value = b""
+        process.returncode = 0
+        process.wait.return_value = 0
+        urlopen.return_value = Response()
+        speaker = Speaker("http://kokoro", "af_heart", output="room.sink")
+        speaker._pipewire_stream("Hello.", 0.0)
+        self.assertEqual(process.stdin.chunks, [b"first", b"second"])
+        self.assertIsNotNone(speaker.first_synthesis_seconds)
+        self.assertIsNotNone(speaker.first_play_at)
+        command = popen.call_args.args[0]
+        self.assertEqual(command[:8], [
+            "pw-play",
+            "--raw",
+            "--format",
+            "s16",
+            "--rate",
+            "24000",
+            "--channels",
+            "1",
+        ])
+        self.assertIn("room.sink", command)
+
 
 class AsyncDuplexTests(unittest.IsolatedAsyncioTestCase):
+    async def test_codex_turn_is_the_only_source_of_spoken_text(self):
+        calls = []
+
+        class Server:
+            async def stream_turn(self, thread, text, *, effort):
+                calls.append((thread, text, effort))
+                yield SimpleNamespace(
+                    kind="assistant.delta",
+                    payload={"text": "Exact harness response."},
+                    subject="turn:turn-1",
+                )
+                yield SimpleNamespace(
+                    kind="assistant.completed",
+                    payload={},
+                    subject="turn:turn-1",
+                )
+
+        class CapturingSpeaker:
+            def __init__(self):
+                self.spoken = []
+
+            async def say(self, text):
+                self.spoken.append(text)
+
+            def interrupt(self):
+                raise AssertionError("turn should not be interrupted")
+
+        speaker = CapturingSpeaker()
+        turn = DuplexTurn(Server(), "current-harness", speaker)
+        response = await turn.run("Exact spoken transcript.", "high")
+        self.assertEqual(
+            calls,
+            [("current-harness", "Exact spoken transcript.", "high")],
+        )
+        self.assertEqual(response, "Exact harness response.")
+        self.assertEqual(speaker.spoken, ["Exact harness response."])
+
     async def test_barge_in_interrupts_active_turn_before_final(self):
         class Mic:
             def __init__(self):

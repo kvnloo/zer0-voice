@@ -2,7 +2,8 @@ import asyncio
 import unittest
 from pathlib import Path
 
-from duplex import HarnessRouter, codex_thread_context
+from app_server import AppServerError
+from duplex import HarnessRouter, existing_harness_thread
 from workspace_router import Resolution, Route, resolve_context
 
 
@@ -76,38 +77,6 @@ class WorkspaceRouterTests(unittest.TestCase):
         self.assertEqual(result.reason, "ambiguous_active_windows")
         self.assertEqual({item.project for item in result.candidates}, {"pm", "zerOS"})
 
-    def test_codex_thread_context_keeps_recent_conversation_only(self):
-        thread = {
-            "turns": [
-                {
-                    "items": [
-                        {
-                            "type": "userMessage",
-                            "content": [{"type": "text", "text": "old question"}],
-                        },
-                        {"type": "commandExecution", "command": "secret raw command"},
-                        {"type": "agentMessage", "text": "old answer"},
-                    ]
-                },
-                {
-                    "items": [
-                        {
-                            "type": "userMessage",
-                            "content": [{"type": "text", "text": "new question"}],
-                        },
-                        {"type": "agentMessage", "text": "new answer"},
-                    ]
-                },
-            ]
-        }
-        result = codex_thread_context(thread, messages=2)
-        self.assertEqual(
-            result,
-            ("user: new question", "assistant: new answer"),
-        )
-        self.assertNotIn("secret raw command", " ".join(result))
-
-
 class HarnessRouterTests(unittest.IsolatedAsyncioTestCase):
     async def test_focus_switch_gets_distinct_cached_harness_threads(self):
         routes = [
@@ -132,9 +101,6 @@ class HarnessRouterTests(unittest.IsolatedAsyncioTestCase):
                 self.resumed.append((thread, kwargs["cwd"]))
                 return thread
 
-            async def read_thread(self, _thread):
-                return {"turns": []}
-
             async def start_thread(self, **_kwargs):
                 raise AssertionError("existing harness thread should be resumed")
 
@@ -143,7 +109,6 @@ class HarnessRouterTests(unittest.IsolatedAsyncioTestCase):
             server,
             Workspace(),
             "fallback",
-            instructions="voice",
             timeout=1,
         )
         async def inline(function, *args, **kwargs):
@@ -181,9 +146,6 @@ class HarnessRouterTests(unittest.IsolatedAsyncioTestCase):
             async def resume_thread(self, thread, **_kwargs):
                 return thread
 
-            async def read_thread(self, _thread):
-                return {"turns": []}
-
             async def start_thread(self, **_kwargs):
                 raise AssertionError
 
@@ -194,7 +156,6 @@ class HarnessRouterTests(unittest.IsolatedAsyncioTestCase):
             Server(),
             Workspace(),
             "fallback",
-            instructions="voice",
             timeout=1,
         )
         from unittest.mock import patch
@@ -208,48 +169,41 @@ class HarnessRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(still_pinned.key, "zerOS")
         self.assertEqual(focused.key, "pm")
 
-    async def test_slow_thread_context_never_blocks_live_route(self):
-        pm = Route("pm", ROUTES["pm"], "%1", "0", "1")
-
-        class Workspace:
-            routes = ROUTES
-
-            def resolve(self):
-                return Resolution(pm, "focused_pane", (pm,))
+    async def test_explicit_thread_is_resumed_without_rewriting_instructions(self):
+        calls = []
 
         class Server:
-            async def list_threads(self, _cwd):
-                return [{"id": "native-pm"}]
-
-            async def resume_thread(self, thread, **_kwargs):
+            async def resume_thread(self, thread, **kwargs):
+                calls.append((thread, kwargs))
                 return thread
 
-            async def read_thread(self, _thread):
-                await asyncio.sleep(1)
-                return {"turns": []}
-
-            async def start_thread(self, **_kwargs):
-                raise AssertionError
-
-        async def inline(function, *args, **kwargs):
-            return function(*args, **kwargs)
-
-        router = HarnessRouter(
+        result = await existing_harness_thread(
             Server(),
-            Workspace(),
-            "fallback",
-            instructions="voice",
-            timeout=0.01,
+            ROUTES["pm"],
+            "this-harness",
+            timeout=1,
         )
+        self.assertEqual(result, "this-harness")
+        self.assertEqual(
+            calls,
+            [("this-harness", {"cwd": ROUTES["pm"]})],
+        )
+
+    async def test_missing_harness_thread_fails_instead_of_creating_chat(self):
+        class Server:
+            async def list_threads(self, _cwd):
+                return []
+
         from unittest.mock import patch
 
-        with patch("duplex.asyncio.to_thread", new=inline):
-            started = asyncio.get_running_loop().time()
-            binding = await router.resolve("hello")
-            elapsed = asyncio.get_running_loop().time() - started
-        self.assertEqual(binding.key, "pm")
-        self.assertEqual(binding.context, ())
-        self.assertLess(elapsed, 0.1)
+        with patch.dict("os.environ", {}, clear=True):
+            with self.assertRaisesRegex(AppServerError, "no existing Codex"):
+                await existing_harness_thread(
+                    Server(),
+                    ROUTES["pm"],
+                    None,
+                    timeout=1,
+                )
 
 
 if __name__ == "__main__":

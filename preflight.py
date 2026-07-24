@@ -44,8 +44,8 @@ def preflight(
     *,
     whisper_python: str,
     kokoro_url: str,
-    ollama_url: str,
-    live_model: str,
+    ollama_url: str | None,
+    live_model: str | None,
     input_device: str | None,
     output_device: str | None,
     workspace_routing: bool,
@@ -79,31 +79,32 @@ def preflight(
     if not checks["tts"]["ok"]:
         failures.append("Kokoro is not healthy")
 
-    try:
-        tags = request_json(f"{ollama_url.rstrip('/')}/api/tags")
-        models = [model.get("name") for model in tags.get("models", ())]
-        checks["live_model"] = {
-            "ok": live_model in models,
-            "url": ollama_url,
-            "model": live_model,
-            "available": models,
-        }
-        if live_model not in models:
-            failures.append(f"Ollama model {live_model!r} is not installed")
-        processes = request_json(f"{ollama_url.rstrip('/')}/api/ps")
-        loaded = next(
-            (
-                model
-                for model in processes.get("models", ())
-                if model.get("name") == live_model
-            ),
-            None,
-        )
-        if loaded and not loaded.get("size_vram"):
-            warnings.append(f"Ollama model {live_model!r} is CPU-only")
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        checks["live_model"] = {"ok": False, "url": ollama_url, "error": str(exc)}
-        failures.append("Ollama is unreachable")
+    if ollama_url and live_model:
+        try:
+            tags = request_json(f"{ollama_url.rstrip('/')}/api/tags")
+            models = [model.get("name") for model in tags.get("models", ())]
+            checks["live_model"] = {
+                "ok": live_model in models,
+                "url": ollama_url,
+                "model": live_model,
+                "available": models,
+            }
+            if live_model not in models:
+                failures.append(f"Ollama model {live_model!r} is not installed")
+            processes = request_json(f"{ollama_url.rstrip('/')}/api/ps")
+            loaded = next(
+                (
+                    model
+                    for model in processes.get("models", ())
+                    if model.get("name") == live_model
+                ),
+                None,
+            )
+            if loaded and not loaded.get("size_vram"):
+                warnings.append(f"Ollama model {live_model!r} is CPU-only")
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            checks["live_model"] = {"ok": False, "url": ollama_url, "error": str(exc)}
+            failures.append("Ollama is unreachable")
 
     try:
         import sounddevice as sd

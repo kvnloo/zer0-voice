@@ -1,0 +1,54 @@
+#!/bin/sh
+set -eu
+
+# Both the TUI and local voice bridge must use the same managed app-server.
+# This is the launch boundary that makes voice turns visible in the harness.
+codex app-server daemon start >/dev/null
+
+voice=0
+if [ "${1:-}" = "--voice" ]; then
+    voice=1
+    shift
+fi
+
+if [ "${1:-}" = "--new" ]; then
+    if [ "$voice" -eq 1 ]; then
+        echo "--voice requires an existing THREAD_ID" >&2
+        exit 2
+    fi
+    shift
+    exec codex --remote unix:// "$@"
+fi
+
+thread="${1:-${CODEX_THREAD_ID:-}}"
+if [ -z "$thread" ]; then
+    echo "usage: voice/codex-harness [--voice] THREAD_ID" >&2
+    echo "       voice/codex-harness --new [-C DIRECTORY]" >&2
+    exit 2
+fi
+
+shift || true
+if [ "$voice" -eq 0 ]; then
+    exec codex --remote unix:// resume "$thread" "$@"
+fi
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+log="${XDG_STATE_HOME:-$HOME/.local/state}/zer0-voice/$thread.log"
+mkdir -p "$(dirname -- "$log")"
+"$root/voice/duplex" \
+    --session "$thread" \
+    --app-server shared \
+    --no-workspace-routing \
+    --input "${ZERO_VOICE_INPUT:-Blue Snowball}" \
+    --output "${ZERO_VOICE_OUTPUT:-effect_input.aural_evolution}" \
+    --metrics "$root/bench/voice-history.jsonl" \
+    >"$log" 2>&1 &
+voice_pid=$!
+
+cleanup() {
+    kill "$voice_pid" 2>/dev/null || true
+    wait "$voice_pid" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM HUP
+
+codex --remote unix:// resume "$thread" "$@"

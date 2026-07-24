@@ -6,12 +6,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import re
 import subprocess
 import sys
 import threading
 import time
-from collections import defaultdict, deque
+import urllib.request
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncIterator
@@ -26,7 +28,6 @@ sys.path[:0] = [
 
 from app_server import AppServerError, CodexAppServer
 from conversation import ListenConfig, kokoro_wav, rms, transcribe
-from orchestrator import OllamaLiveLane
 from preflight import preflight
 from workspace_router import Route, WorkspaceRouter, load_routes
 
@@ -286,10 +287,86 @@ class Speaker:
             detail = stderr.decode(errors="replace").strip()
             raise RuntimeError(f"PipeWire playback failed: {detail or player.returncode}")
 
+    def _pipewire_stream(self, text: str, synthesis_started: float) -> None:
+        body = json.dumps(
+            {
+                "model": "kokoro",
+                "voice": self.voice,
+                "input": text,
+                "response_format": "pcm",
+                "stream": True,
+            }
+        ).encode()
+        request = urllib.request.Request(
+            f"{self.base_url.rstrip('/')}/v1/audio/speech",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        command = [
+            "pw-play",
+            "--raw",
+            "--format",
+            "s16",
+            "--rate",
+            "24000",
+            "--channels",
+            "1",
+            "--latency",
+            self.latency,
+        ]
+        if self.output:
+            command.extend(("--target", self.output))
+        command.append("-")
+        player = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        with self._lock:
+            if self.cancel.is_set():
+                player.terminate()
+            self._player = player
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                while not self.cancel.is_set():
+                    chunk = response.read(4096)
+                    if not chunk:
+                        break
+                    if self.first_synthesis_seconds is None:
+                        now = time.monotonic()
+                        self.first_synthesis_seconds = now - synthesis_started
+                        self.first_play_at = now
+                    assert player.stdin
+                    player.stdin.write(chunk)
+                    player.stdin.flush()
+        except BrokenPipeError:
+            if not self.cancel.is_set():
+                raise
+        finally:
+            if player.stdin:
+                player.stdin.close()
+            player.wait()
+            stderr = player.stderr.read() if player.stderr else b""
+            with self._lock:
+                if self._player is player:
+                    self._player = None
+        if player.returncode and not self.cancel.is_set():
+            detail = stderr.decode(errors="replace").strip()
+            raise RuntimeError(f"PipeWire playback failed: {detail or player.returncode}")
+
     async def say(self, text: str) -> None:
         if self.cancel.is_set() or not text:
             return
         synthesis_started = time.monotonic()
+        if self.backend == "pipewire":
+            await asyncio.to_thread(
+                self._pipewire_stream,
+                text,
+                synthesis_started,
+            )
+            return
         audio = await asyncio.to_thread(
             kokoro_wav, text, base_url=self.base_url, voice=self.voice
         )
@@ -299,9 +376,6 @@ class Speaker:
             return
         if self.first_play_at is None:
             self.first_play_at = time.monotonic()
-        if self.backend == "pipewire":
-            await asyncio.to_thread(self._pipewire_play, audio)
-            return
         import sounddevice as sd
         from conversation import decode_wav
 
@@ -347,173 +421,12 @@ class DuplexTurn:
             await self.server.interrupt(self.thread, self.turn_id)
 
 
-class LiveTurn:
-    """Immediate local response lane; deep Codex work never blocks its speech."""
-
-    def __init__(
-        self,
-        lane: OllamaLiveLane,
-        speaker: Speaker,
-        context: tuple[str, ...],
-    ):
-        self.lane = lane
-        self.speaker = speaker
-        self.context = context
-
-    async def run(self, text: str) -> str:
-        chunks: asyncio.Queue[str | None] = asyncio.Queue()
-        response: list[str] = []
-
-        async def generate() -> None:
-            chunker = SentenceChunker()
-            async for delta in self.lane.stream(text, self.context):
-                response.append(delta)
-                for chunk in chunker.feed(delta):
-                    await chunks.put(chunk)
-            if tail := chunker.flush():
-                await chunks.put(tail)
-            await chunks.put(None)
-
-        async def speak() -> None:
-            while (chunk := await chunks.get()) is not None:
-                await self.speaker.say(chunk)
-
-        await asyncio.gather(generate(), speak())
-        return "".join(response).strip()
-
-    async def interrupt(self) -> None:
-        self.speaker.interrupt()
-
-
-class SpokenTextTurn:
-    def __init__(self, speaker: Speaker, text: str):
-        self.speaker = speaker
-        self.text = text
-
-    async def run(self) -> None:
-        await self.speaker.say(self.text)
-
-    async def interrupt(self) -> None:
-        self.speaker.interrupt()
-
-
-class InterruptSlot:
-    """Mutable target lets one microphone listener follow changing speakers."""
-
-    def __init__(self, target=None):
-        self.target = target
-
-    async def interrupt(self) -> None:
-        if self.target is not None:
-            await self.target.interrupt()
-
-
-def should_speak_followup(text: str) -> bool:
-    return bool(text.strip()) and text.strip().upper() != "NO_FOLLOWUP"
-
-
-class DeepWorker:
-    """Sequential persistent Codex lane that enriches future live turns."""
-
-    def __init__(self, server: CodexAppServer):
-        self.server = server
-        self.queue: asyncio.Queue[
-            tuple[str, str, str, tuple[str, ...], asyncio.Future[str]] | None
-        ] = asyncio.Queue()
-        self.insights: dict[str, deque[str]] = defaultdict(
-            lambda: deque(maxlen=8)
-        )
-
-    def submit(
-        self,
-        route_key: str,
-        thread: str,
-        text: str,
-        context: tuple[str, ...],
-    ) -> asyncio.Future[str]:
-        future = asyncio.get_running_loop().create_future()
-        future.add_done_callback(
-            lambda completed: (
-                completed.exception() if not completed.cancelled() else None
-            )
-        )
-        self.queue.put_nowait((route_key, thread, text, context, future))
-        return future
-
-    async def run(self) -> None:
-        while item := await self.queue.get():
-            route_key, thread, text, context, future = item
-            prompt = (
-                "Analyze the latest live conversation turn. For greetings, acknowledgments, "
-                "small talk, or anything the fast live lane can answer safely, return exactly "
-                "NO_FOLLOWUP. Otherwise do useful tool work when appropriate and return a "
-                "compact, naturally spoken verified result or correction that the "
-                f"live lane should know next. This turn belongs to route {route_key!r}; "
-                "keep all actions and assumptions scoped to that harness.\n\n"
-                f"Context:\n{chr(10).join(context)}\n\nLatest user: {text}"
-            )
-            try:
-                response = []
-                async for event in self.server.stream_turn(
-                    thread, prompt, effort="medium"
-                ):
-                    if event.kind == "assistant.delta":
-                        response.append(str(event.payload["text"]))
-                insight = "".join(response).strip()
-                if should_speak_followup(insight):
-                    self.insights[route_key].append(insight)
-                    print(f"Deep[{route_key}]: {insight}", flush=True)
-                if not future.done():
-                    future.set_result(insight)
-            except Exception as exc:
-                if not future.done():
-                    future.set_exception(exc)
-
-
 @dataclass(frozen=True, slots=True)
 class ThreadBinding:
     key: str
     thread: str
     route: Route | None
     reason: str
-    context: tuple[str, ...] = ()
-
-
-def codex_thread_context(
-    thread: dict[str, object],
-    *,
-    messages: int = 8,
-    character_budget: int = 4000,
-) -> tuple[str, ...]:
-    extracted: list[str] = []
-    for turn in thread.get("turns", ()) if isinstance(thread, dict) else ():
-        for item in turn.get("items", ()) if isinstance(turn, dict) else ():
-            if not isinstance(item, dict):
-                continue
-            kind = item.get("type")
-            if kind == "userMessage":
-                parts = [
-                    part.get("text", "")
-                    for part in item.get("content", ())
-                    if isinstance(part, dict) and part.get("type") == "text"
-                ]
-                text = " ".join(part for part in parts if part).strip()
-                role = "user"
-            elif kind == "agentMessage":
-                text = str(item.get("text", "")).strip()
-                role = "assistant"
-            else:
-                continue
-            if text:
-                extracted.append(f"{role}: {text}")
-    selected: deque[str] = deque()
-    used = 0
-    for item in reversed(extracted):
-        if selected and (len(selected) >= messages or used + len(item) > character_budget):
-            break
-        selected.appendleft(item[-character_budget:])
-        used += len(item)
-    return tuple(selected)
 
 
 class HarnessRouter:
@@ -525,13 +438,11 @@ class HarnessRouter:
         workspace: WorkspaceRouter | None,
         fallback_thread: str,
         *,
-        instructions: str,
         timeout: float,
     ):
         self.server = server
         self.workspace = workspace
         self.fallback_thread = fallback_thread
-        self.instructions = instructions
         self.timeout = timeout
         self.bindings: dict[str, ThreadBinding] = {}
         self.pinned_project: str | None = None
@@ -583,12 +494,11 @@ class HarnessRouter:
                     binding.thread,
                     route,
                     "spoken_pin",
-                    binding.context,
                 )
-                return await self._refresh(binding)
+                return binding
             binding = await self._attach(route, "spoken_pin")
             self.bindings[route.project] = binding
-            return await self._refresh(binding)
+            return binding
         try:
             resolution = await asyncio.to_thread(self.workspace.resolve)
         except Exception as exc:
@@ -608,28 +518,10 @@ class HarnessRouter:
             )
         route = resolution.route
         if route.project in self.bindings:
-            return await self._refresh(self.bindings[route.project])
+            return self.bindings[route.project]
         binding = await self._attach(route, resolution.reason)
         self.bindings[route.project] = binding
-        return await self._refresh(binding)
-
-    async def _refresh(self, binding: ThreadBinding) -> ThreadBinding:
-        try:
-            thread = await asyncio.wait_for(
-                self.server.read_thread(binding.thread),
-                timeout=min(self.timeout, 0.25),
-            )
-        except (TimeoutError, AppServerError, KeyError):
-            return binding
-        refreshed = ThreadBinding(
-            binding.key,
-            binding.thread,
-            binding.route,
-            binding.reason,
-            codex_thread_context(thread),
-        )
-        self.bindings[binding.key] = refreshed
-        return refreshed
+        return binding
 
     async def _attach(self, route: Route, reason: str) -> ThreadBinding:
         try:
@@ -642,14 +534,12 @@ class HarnessRouter:
                     self.server.resume_thread(
                         threads[0]["id"],
                         cwd=route.cwd,
-                        developer_instructions=self.instructions,
                     ),
                     timeout=self.timeout,
                 )
             else:
-                thread = await self.server.start_thread(
-                    cwd=route.cwd,
-                    developer_instructions=self.instructions,
+                raise AppServerError(
+                    f"no existing Codex harness thread for {route.project}"
                 )
             print(
                 f"Voice route {route.project} pane={route.pane_id} thread={thread}",
@@ -657,21 +547,41 @@ class HarnessRouter:
             )
             return ThreadBinding(route.project, thread, route, reason)
         except (TimeoutError, AppServerError, KeyError) as exc:
-            print(
-                f"Could not attach {route.project} harness ({exc or 'timed out'}); "
-                "using an isolated project thread.",
-                flush=True,
+            raise AppServerError(
+                f"could not attach the existing {route.project} harness: "
+                f"{exc or 'timed out'}"
             )
-            thread = await self.server.start_thread(
-                cwd=route.cwd,
-                developer_instructions=self.instructions,
-            )
-            return ThreadBinding(route.project, thread, route, "isolated_fallback")
+
+
+async def existing_harness_thread(
+    server: CodexAppServer,
+    cwd: Path,
+    requested: str | None,
+    *,
+    timeout: float,
+) -> str:
+    """Resolve a real harness thread and never manufacture a detached chat."""
+
+    thread_id = requested or os.environ.get("CODEX_THREAD_ID")
+    if thread_id:
+        return await asyncio.wait_for(
+            server.resume_thread(thread_id, cwd=cwd),
+            timeout=timeout,
+        )
+    threads = await asyncio.wait_for(server.list_threads(cwd), timeout=timeout)
+    if not threads:
+        raise AppServerError(
+            "no existing Codex harness thread; pass --session or launch from Codex"
+        )
+    return await asyncio.wait_for(
+        server.resume_thread(threads[0]["id"], cwd=cwd),
+        timeout=timeout,
+    )
 
 
 async def next_final(
     mic: Microphone,
-    turn: DuplexTurn | LiveTurn | SpokenTextTurn | InterruptSlot | None = None,
+    turn: DuplexTurn | None = None,
     *,
     interrupt_mode: str = "final",
 ) -> np.ndarray:
@@ -696,8 +606,8 @@ async def run(args) -> None:
             preflight,
             whisper_python=sys.executable,
             kokoro_url=args.kokoro_url,
-            ollama_url=args.ollama_url,
-            live_model=args.live_model,
+            ollama_url=None,
+            live_model=None,
             input_device=args.input,
             output_device=args.output,
             workspace_routing=args.workspace_routing,
@@ -728,38 +638,17 @@ async def run(args) -> None:
         )
     config = ListenConfig(threshold=threshold, silence_ms=args.silence_ms)
     mic = Microphone(config, device=args.input)
-    live = OllamaLiveLane(
-        model=args.live_model,
-        url=f"{args.ollama_url.rstrip('/')}/api/chat",
-    )
-    print(f"Warming live model {args.live_model}…", flush=True)
-    async for _ in live.stream("Reply with only: ready.", ()):
-        pass
-    async with CodexAppServer(cwd=args.cwd) as server:
-        instructions = (
-            "You are the deep intelligence and tool lane behind a live local voice "
-            "model. Work rigorously, then return concise verified steering."
+    async with CodexAppServer(
+        cwd=args.cwd,
+        shared=args.app_server == "shared",
+    ) as server:
+        harness_thread = await existing_harness_thread(
+            server,
+            args.cwd,
+            args.session,
+            timeout=args.session_timeout,
         )
-        deep_thread = None
-        if args.session:
-            try:
-                deep_thread = await asyncio.wait_for(
-                    server.resume_thread(
-                        args.session,
-                        developer_instructions=instructions,
-                    ),
-                    timeout=args.session_timeout,
-                )
-                print(f"Deep lane attached to Codex thread {deep_thread}.", flush=True)
-            except (TimeoutError, AppServerError) as exc:
-                print(
-                    "Could not attach the requested Codex thread "
-                    f"({exc or 'timed out'}); using a dedicated deep thread.",
-                    flush=True,
-                )
-        if deep_thread is None:
-            deep_thread = await server.start_thread(developer_instructions=instructions)
-            print(f"Deep lane started Codex thread {deep_thread}.", flush=True)
+        print(f"Voice attached to existing Codex thread {harness_thread}.", flush=True)
         workspace = (
             WorkspaceRouter(load_routes(args.routes))
             if args.workspace_routing
@@ -768,13 +657,9 @@ async def run(args) -> None:
         harness_router = HarnessRouter(
             server,
             workspace,
-            deep_thread,
-            instructions=instructions,
+            harness_thread,
             timeout=args.session_timeout,
         )
-        deep = DeepWorker(server)
-        deep_task = asyncio.create_task(deep.run())
-        histories: dict[str, deque[str]] = defaultdict(lambda: deque(maxlen=16))
         if args.startup_phrase:
             startup_speaker = Speaker(
                 args.kokoro_url,
@@ -805,25 +690,9 @@ async def run(args) -> None:
                     print(f"You[control]: {text}\nStopping voice mode.", flush=True)
                     break
                 binding = await harness_router.resolve(text)
-                print(f"You[{binding.key}]: {text}", flush=True)
-                history = histories[binding.key]
-                route_note = (
-                    f"system: This spoken turn belongs to the {binding.key!r} harness. "
-                    f"Routing reason: {binding.reason}. Keep the response scoped to "
-                    "that project and do not claim work in another harness."
-                )
-                harness_context = tuple(
-                    f"system: Recent selected-harness context: {item}"
-                    for item in binding.context
-                )
-                context = (route_note,) + harness_context + tuple(history) + tuple(
-                    f"deep: {x}" for x in deep.insights[binding.key]
-                )
-                deep_future = deep.submit(
-                    binding.key,
-                    binding.thread,
-                    text,
-                    context,
+                print(
+                    f"You[{binding.key} thread={binding.thread}]: {text}",
+                    flush=True,
                 )
                 speaker = Speaker(
                     args.kokoro_url,
@@ -832,13 +701,12 @@ async def run(args) -> None:
                     output=args.output,
                     latency=args.playback_latency,
                 )
-                turn = LiveTurn(live, speaker, context)
-                interrupt_slot = InterruptSlot(turn)
-                task = asyncio.create_task(turn.run(text))
+                turn = DuplexTurn(server, binding.thread, speaker)
+                task = asyncio.create_task(turn.run(text, args.effort))
                 listen_task = asyncio.create_task(
                     next_final(
                         mic,
-                        interrupt_slot,
+                        turn,
                         interrupt_mode=args.barge_in,
                     )
                 )
@@ -848,10 +716,7 @@ async def run(args) -> None:
                 if listen_task in done:
                     pending_audio = listen_task.result()
                     await turn.interrupt()
-                else:
-                    interrupt_slot.target = None
                 response = await task
-                history.extend((f"user: {text}", f"assistant: {response}"))
                 first_audio = (
                     speaker.first_play_at - started
                     if speaker.first_play_at is not None
@@ -864,7 +729,7 @@ async def run(args) -> None:
                     else "none"
                 )
                 print(
-                    f"Live: {response}\n"
+                    f"Codex: {response}\n"
                     f"latency asr={asr_seconds:.2f}s "
                     f"tts_first={synthesis} audio_onset={onset} "
                     f"total={time.monotonic() - started:.2f}s",
@@ -902,61 +767,9 @@ async def run(args) -> None:
                             "interrupted": pending_audio is not None,
                         },
                     )
-                if pending_audio is None and not listen_task.done():
-                    async def wait_deep() -> str:
-                        return await asyncio.wait_for(
-                            asyncio.shield(deep_future),
-                            timeout=args.deep_followup_wait,
-                        )
-
-                    deep_wait = asyncio.create_task(wait_deep())
-                    follow_done, _ = await asyncio.wait(
-                        (listen_task, deep_wait),
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    if listen_task in follow_done:
-                        pending_audio = listen_task.result()
-                        deep_wait.cancel()
-                    else:
-                        try:
-                            insight = deep_wait.result()
-                        except TimeoutError:
-                            insight = ""
-                        except Exception as exc:
-                            print(f"Deep follow-up failed: {exc}", flush=True)
-                            insight = ""
-                        if should_speak_followup(insight):
-                            follow_speaker = Speaker(
-                                args.kokoro_url,
-                                args.voice,
-                                backend=args.playback,
-                                output=args.output,
-                                latency=args.playback_latency,
-                            )
-                            followup = SpokenTextTurn(follow_speaker, insight)
-                            interrupt_slot.target = followup
-                            follow_task = asyncio.create_task(followup.run())
-                            follow_done, _ = await asyncio.wait(
-                                (listen_task, follow_task),
-                                return_when=asyncio.FIRST_COMPLETED,
-                            )
-                            if listen_task in follow_done:
-                                pending_audio = listen_task.result()
-                                await followup.interrupt()
-                                await asyncio.gather(
-                                    follow_task,
-                                    return_exceptions=True,
-                                )
-                            else:
-                                interrupt_slot.target = None
-                                listen_task.cancel()
-                        else:
-                            listen_task.cancel()
-                elif not listen_task.done():
+                if not listen_task.done():
                     listen_task.cancel()
         finally:
-            deep.queue.put_nowait(None)
-            await deep_task
             mic.close()
 
 
@@ -969,14 +782,17 @@ def main() -> int:
     parser.add_argument("--language", default="en")
     parser.add_argument("--voice", default="af_heart")
     parser.add_argument("--kokoro-url", default="http://127.0.0.1:8880")
-    parser.add_argument("--session", help="resume this Codex thread for the deep lane")
-    parser.add_argument("--session-timeout", type=float, default=8.0)
     parser.add_argument(
-        "--deep-followup-wait",
-        type=float,
-        default=15.0,
-        help="maximum idle wait for a same-turn smart-lane follow-up",
+        "--session",
+        help="existing Codex harness thread; defaults to CODEX_THREAD_ID",
     )
+    parser.add_argument(
+        "--app-server",
+        choices=("shared", "isolated"),
+        default="shared",
+        help="shared uses the managed Codex daemon; isolated is diagnostic only",
+    )
+    parser.add_argument("--session-timeout", type=float, default=8.0)
     parser.add_argument(
         "--workspace-routing",
         action=argparse.BooleanOptionalAction,
@@ -990,8 +806,6 @@ def main() -> int:
         help="project-to-cwd routing map",
     )
     parser.add_argument("--effort", default="medium")
-    parser.add_argument("--live-model", default="qwen2.5:3b")
-    parser.add_argument("--ollama-url", default="http://127.0.0.1:11434")
     parser.add_argument(
         "--skip-preflight",
         action="store_true",
@@ -1028,7 +842,12 @@ def main() -> int:
         type=Path,
         help="append one privacy-safe JSON latency record per completed turn",
     )
-    parser.add_argument("--silence-ms", type=int, default=520)
+    parser.add_argument(
+        "--silence-ms",
+        type=int,
+        default=850,
+        help="endpoint silence; 850 ms preserves natural mid-sentence pauses",
+    )
     args = parser.parse_args()
     try:
         asyncio.run(run(args))

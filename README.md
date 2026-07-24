@@ -65,24 +65,46 @@ forcing a real interruption to wait for the utterance endpoint. Use
 `--barge-in immediate` or `--barge-in final` only for explicit testing or
 environment-specific tuning.
 
+Utterance endpointing defaults to 850 ms of silence. The earlier 520 ms setting
+split ordinary reflective speech into unrelated harness turns during a real
+conversation. This is intentionally conservative until semantic endpointing
+can distinguish a completed thought from a mid-sentence pause.
+
 The simple `conversation` executable still speaks after a Codex turn completes.
 `duplex` is the production local loop: it keeps the microphone open while Codex
-and Kokoro speak, streams authenticated Codex app-server deltas into sentence
-sized Kokoro chunks, stops output on speech-start, interrupts the active Codex
-turn, endpoints the user's interruption, and immediately continues on the same
-thread.
+and Kokoro speak, sends each transcript as a real turn on the selected existing
+Codex harness thread, streams that thread's authenticated app-server deltas into
+sentence-sized Kokoro chunks, interrupts the active Codex turn on sustained
+speech, endpoints the interruption, and continues on the same thread. No local
+model generates assistant answers.
 
 ```sh
 ./voice/duplex --cwd /workspace/zer0/products/pm
 ```
 
+For the transcript and streamed reply to appear live in the same terminal UI,
+launch both clients against Codex's managed app-server:
+
+```sh
+./voice/codex-harness --voice "$CODEX_THREAD_ID"
+```
+
+This resumes the TUI through `codex --remote unix://`, starts `duplex` against
+the daemon proxy, pins voice to that exact thread, and stops the microphone when
+the TUI exits. Voice logs go to
+`$XDG_STATE_HOME/zer0-voice/THREAD_ID.log` (or
+`~/.local/state/zer0-voice/THREAD_ID.log`). `ZERO_VOICE_INPUT` and
+`ZERO_VOICE_OUTPUT` override the default Blue Snowball and Aural Evolution
+devices. A legacy TUI that was not launched through the shared server cannot
+subscribe to turns created by a second app-server process; restart it with this
+launcher rather than pretending the detached process is integrated.
+
 Before loading models or opening the microphone, `duplex` runs a read-only
-preflight over the Whisper CUDA environment, Kokoro health, installed Ollama
-model, requested audio devices, `pw-play`, and privacy-safe workspace routing.
-Failures stop immediately with structured diagnostics; warnings identify
-non-fatal conditions such as CPU-only Ollama or ambiguous tmux focus. Use
-`--skip-preflight` only when an external supervisor has already run the same
-checks.
+preflight over the Whisper CUDA environment, Kokoro health, requested audio
+devices, `pw-play`, and privacy-safe workspace routing. Failures stop
+immediately with structured diagnostics; warnings identify non-fatal conditions
+such as ambiguous tmux focus. Use `--skip-preflight` only when an external
+supervisor has already run the same checks.
 
 The launcher supplies the CUDA 12 libraries already installed with the global
 Kokoro environment, allowing Faster Whisper `small.en` to run on the GPU without
@@ -93,26 +115,20 @@ By default, each completed utterance resolves the privacy-filtered
 of that turn. Switching windows does not redirect an answer that is already
 speaking. If the user interrupts, the pending utterance resolves focus again and
 can route to the newly focused harness. Each routed project has isolated live
-history and deep insights, and its newest interactive Codex thread is resumed
-when available.
+thread identity, and its newest interactive Codex thread is resumed when
+available.
 
-The fast local lane starts speaking without waiting for the deeper Codex lane.
-After that response finishes, the microphone stays live while the runtime waits
-up to 15 seconds for a same-turn verified follow-up. The deep lane returns
-`NO_FOLLOWUP` for greetings, acknowledgements, and other turns that do not
-benefit from a second answer. A meaningful result is spoken immediately and is
-still interruptible with the normal sustained-speech policy. If a new utterance
-arrives first, it wins the race and is routed using the newly active harness;
-use `--deep-followup-wait` to tune the bounded idle wait.
+The launch harness is selected from `--session`, then `CODEX_THREAD_ID`, then
+the newest existing interactive thread in `--cwd`. The runtime never silently
+creates a detached fallback conversation. A routing switch likewise resumes an
+existing interactive thread for that project or fails closed.
 
-For a resolved Codex harness, the router also reads a bounded snapshot of the
-eight most recent user/assistant messages (maximum 4,000 characters). Tool
-commands, tool output, approvals, and other item types are excluded. Refresh has
-a 250 ms ceiling and falls back to the last cached snapshot, so harness context
-improves the live reply without becoming an unbounded latency gate.
+The bridge does not copy recent messages into a second prompt. Resuming the
+actual thread gives Codex its authoritative conversation and tool history
+without a redundant context fetch or another model.
 
 Project paths are configured in `voice/routes.json`. Disable routing with
-`--no-workspace-routing`, or pin the deep lane with `--session THREAD_ID`.
+`--no-workspace-routing`, or pin the harness with `--session THREAD_ID`.
 Routing fails closed to the launch-context thread when the sanitized workspace
 sensor reports multiple active harness windows without a focused tmux pane.
 Full window-to-window switching therefore requires `workspace-copilot` context
