@@ -27,6 +27,7 @@ sys.path[:0] = [
 from app_server import AppServerError, CodexAppServer
 from conversation import ListenConfig, kokoro_wav, rms, transcribe
 from orchestrator import OllamaLiveLane
+from preflight import preflight
 from workspace_router import Route, WorkspaceRouter, load_routes
 
 
@@ -574,6 +575,24 @@ async def next_final(
 async def run(args) -> None:
     from faster_whisper import WhisperModel
 
+    if not args.skip_preflight:
+        report = await asyncio.to_thread(
+            preflight,
+            whisper_python=sys.executable,
+            kokoro_url=args.kokoro_url,
+            ollama_url=args.ollama_url,
+            live_model=args.live_model,
+            input_device=args.input,
+            output_device=args.output,
+            workspace_routing=args.workspace_routing,
+            routes=args.routes,
+        )
+        print(json.dumps(report, indent=2, sort_keys=True), flush=True)
+        if not report["ok"]:
+            raise RuntimeError(
+                "voice preflight failed: " + "; ".join(report["failures"])
+            )
+
     model = WhisperModel(
         args.whisper_model,
         device=args.device,
@@ -593,7 +612,10 @@ async def run(args) -> None:
         )
     config = ListenConfig(threshold=threshold, silence_ms=args.silence_ms)
     mic = Microphone(config, device=args.input)
-    live = OllamaLiveLane(model=args.live_model)
+    live = OllamaLiveLane(
+        model=args.live_model,
+        url=f"{args.ollama_url.rstrip('/')}/api/chat",
+    )
     print(f"Warming live model {args.live_model}…", flush=True)
     async for _ in live.stream("Reply with only: ready.", ()):
         pass
@@ -785,6 +807,12 @@ def main() -> int:
     )
     parser.add_argument("--effort", default="medium")
     parser.add_argument("--live-model", default="qwen2.5:3b")
+    parser.add_argument("--ollama-url", default="http://127.0.0.1:11434")
+    parser.add_argument(
+        "--skip-preflight",
+        action="store_true",
+        help="skip dependency checks when a supervisor has already verified them",
+    )
     parser.add_argument(
         "--playback",
         default="pipewire",

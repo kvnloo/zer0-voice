@@ -69,6 +69,14 @@ thread.
 ./voice/duplex --cwd /workspace/zer0/products/pm
 ```
 
+Before loading models or opening the microphone, `duplex` runs a read-only
+preflight over the Whisper CUDA environment, Kokoro health, installed Ollama
+model, requested audio devices, `pw-play`, and privacy-safe workspace routing.
+Failures stop immediately with structured diagnostics; warnings identify
+non-fatal conditions such as CPU-only Ollama or ambiguous tmux focus. Use
+`--skip-preflight` only when an external supervisor has already run the same
+checks.
+
 The launcher supplies the CUDA 12 libraries already installed with the global
 Kokoro environment, allowing Faster Whisper `small.en` to run on the GPU without
 duplicating those packages.
