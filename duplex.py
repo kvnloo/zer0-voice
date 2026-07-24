@@ -28,6 +28,7 @@ sys.path[:0] = [
 
 from app_server import AppServerError, CodexAppServer
 from conversation import ListenConfig, kokoro_wav, rms, transcribe
+from events import Event
 from preflight import preflight
 from workspace_router import Route, WorkspaceRouter, load_routes
 
@@ -42,6 +43,34 @@ def append_metric(path: Path, metric: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as output:
         output.write(json.dumps(metric, separators=(",", ":"), sort_keys=True) + "\n")
+
+
+def publish_transcript(url: str, thread: str, text: str, ts_ns: int) -> None:
+    event = Event(
+        source="codex.voice",
+        kind="voice.transcript.final",
+        subject=f"voice:{thread}:{ts_ns}",
+        payload={"text": text, "thread": thread},
+        ts_ns=ts_ns,
+    )
+    request = urllib.request.Request(
+        url,
+        data=event.json().encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=0.5) as response:
+        if response.status >= 300:
+            raise RuntimeError(f"event relay returned HTTP {response.status}")
+
+
+async def publish_transcript_best_effort(
+    url: str, thread: str, text: str, ts_ns: int
+) -> None:
+    try:
+        await asyncio.to_thread(publish_transcript, url, thread, text, ts_ns)
+    except (OSError, RuntimeError) as error:
+        print(f"Event relay unavailable: {error}", flush=True)
 
 
 def voice_control(text: str) -> str | None:
@@ -694,6 +723,15 @@ async def run(args) -> None:
                     f"You[{binding.key} thread={binding.thread}]: {text}",
                     flush=True,
                 )
+                if args.event_url:
+                    asyncio.create_task(
+                        publish_transcript_best_effort(
+                            args.event_url,
+                            binding.thread,
+                            text,
+                            time.time_ns(),
+                        )
+                    )
                 speaker = Speaker(
                     args.kokoro_url,
                     args.voice,
@@ -807,6 +845,11 @@ def main() -> int:
         help="project-to-cwd routing map",
     )
     parser.add_argument("--effort", default="medium")
+    parser.add_argument(
+        "--event-url",
+        default="http://127.0.0.1:8787/v1/events",
+        help="best-effort transcript event relay; pass an empty string to disable",
+    )
     parser.add_argument(
         "--skip-preflight",
         action="store_true",

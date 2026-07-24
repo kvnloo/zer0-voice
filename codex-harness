@@ -33,8 +33,42 @@ if [ "$voice" -eq 0 ]; then
 fi
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-log="${XDG_STATE_HOME:-$HOME/.local/state}/zer0-voice/$thread.log"
+state="${XDG_STATE_HOME:-$HOME/.local/state}/zer0-voice"
+log="$state/$thread.log"
 mkdir -p "$(dirname -- "$log")"
+relay_pid=
+voice_pid=
+cleanup() {
+    if [ -n "$voice_pid" ]; then
+        kill "$voice_pid" 2>/dev/null || true
+        wait "$voice_pid" 2>/dev/null || true
+    fi
+    if [ -n "$relay_pid" ]; then
+        kill "$relay_pid" 2>/dev/null || true
+        wait "$relay_pid" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT INT TERM HUP
+
+if ! curl -fsS --max-time 1 http://127.0.0.1:8787/healthz >/dev/null 2>&1; then
+    if [ ! -x "$root/core/target/release/zer0d" ]; then
+        cargo build --release --manifest-path "$root/core/Cargo.toml" --bin zer0d
+    fi
+    python "$root/integration/relay.py" \
+        --events "$state/events.jsonl" \
+        --zer0d "$root/core/target/release/zer0d" \
+        >"$state/relay.log" 2>&1 &
+    relay_pid=$!
+    attempts=0
+    until curl -fsS --max-time 1 http://127.0.0.1:8787/healthz >/dev/null 2>&1; do
+        attempts=$((attempts + 1))
+        if [ "$attempts" -ge 20 ]; then
+            echo "event relay did not become ready; see $state/relay.log" >&2
+            exit 1
+        fi
+        sleep 0.1
+    done
+fi
 "$root/voice/duplex" \
     --session "$thread" \
     --app-server shared \
@@ -44,11 +78,5 @@ mkdir -p "$(dirname -- "$log")"
     --metrics "$root/bench/voice-history.jsonl" \
     >"$log" 2>&1 &
 voice_pid=$!
-
-cleanup() {
-    kill "$voice_pid" 2>/dev/null || true
-    wait "$voice_pid" 2>/dev/null || true
-}
-trap cleanup EXIT INT TERM HUP
 
 codex --remote unix:// resume "$thread" "$@"

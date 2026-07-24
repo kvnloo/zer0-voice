@@ -19,6 +19,7 @@ from duplex import (
     adaptive_threshold,
     append_metric,
     next_final,
+    publish_transcript,
     voice_control,
 )
 
@@ -105,6 +106,19 @@ class DuplexTests(unittest.TestCase):
             append_metric(path, {"schema": 1, "route": "zerOS", "total_seconds": 2.0})
             rows = [json.loads(line) for line in path.read_text().splitlines()]
         self.assertEqual([row["route"] for row in rows], ["pm", "zerOS"])
+
+    @patch("duplex.urllib.request.urlopen")
+    def test_transcript_event_preserves_text_and_thread(self, urlopen):
+        urlopen.return_value.__enter__.return_value.status = 202
+        publish_transcript("http://relay/v1/events", "thread-7", "create a task", 99)
+        request = urlopen.call_args.args[0]
+        event = json.loads(request.data)
+        self.assertEqual(event["kind"], "voice.transcript.final")
+        self.assertEqual(event["subject"], "voice:thread-7:99")
+        self.assertEqual(event["payload"], {
+            "text": "create a task",
+            "thread": "thread-7",
+        })
 
     def test_spoken_stop_is_exact_and_does_not_capture_task_language(self):
         for phrase in (
