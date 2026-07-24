@@ -40,6 +40,17 @@ class VoiceMetricVerifierTests(unittest.TestCase):
             )
         )
 
+    def test_pipeline_cohorts_preserve_history_without_poisoning_current_gate(self):
+        legacy = row(scale=100)
+        current = {**row(), "pipeline": "codex-harness-pcm-v1"}
+        result = verify(
+            [legacy, current],
+            pipeline="codex-harness-pcm-v1",
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["ledger_rows"], 2)
+        self.assertEqual(result["rows"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

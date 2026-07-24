@@ -741,6 +741,7 @@ async def run(args) -> None:
                         args.metrics,
                         {
                             "schema": 1,
+                            "pipeline": "codex-harness-pcm-v1",
                             "recorded_at_ns": time.time_ns(),
                             "route": binding.key,
                             "routing_reason": binding.reason,

@@ -16,6 +16,7 @@ DEFAULT_BUDGETS = {
     "audio_onset_after_endpoint_seconds": 2.50,
     "estimated_audio_onset_after_user_stop_seconds": 3.00,
 }
+PRODUCTION_PIPELINE = "codex-harness-pcm-v1"
 
 
 def percentile(values: list[float], fraction: float) -> float:
@@ -29,11 +30,17 @@ def verify(
     *,
     minimum_samples: int = 1,
     budgets: dict[str, float] | None = None,
+    pipeline: str | None = None,
 ) -> dict[str, object]:
     budgets = budgets or DEFAULT_BUDGETS
+    selected = (
+        [row for row in rows if row.get("pipeline") == pipeline]
+        if pipeline
+        else rows
+    )
     completed = [
         row
-        for row in rows
+        for row in selected
         if not row.get("interrupted")
         and all(isinstance(row.get(field), (int, float)) for field in budgets)
     ]
@@ -59,9 +66,11 @@ def verify(
     return {
         "schema": 1,
         "ok": not violations,
-        "rows": len(rows),
+        "pipeline": pipeline,
+        "rows": len(selected),
+        "ledger_rows": len(rows),
         "completed_samples": len(completed),
-        "interrupted_samples": sum(bool(row.get("interrupted")) for row in rows),
+        "interrupted_samples": sum(bool(row.get("interrupted")) for row in selected),
         "metrics": metrics,
         "violations": violations,
     }
@@ -84,10 +93,12 @@ def main() -> int:
         default=Path(__file__).parents[1] / "bench/voice-history.jsonl",
     )
     parser.add_argument("--minimum-samples", type=int, default=1)
+    parser.add_argument("--pipeline", default=PRODUCTION_PIPELINE)
     args = parser.parse_args()
     result = verify(
         read_jsonl(args.ledger),
         minimum_samples=args.minimum_samples,
+        pipeline=args.pipeline,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result["ok"] else 1

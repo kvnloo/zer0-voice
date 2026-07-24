@@ -149,6 +149,11 @@ transcript text or audio. Verify the current ledger with:
 python voice/verify_metrics.py
 ```
 
+The verifier gates only the current `codex-harness-pcm-v1` pipeline while
+retaining older rows as immutable historical cohorts. A rewrite therefore
+starts red with zero current samples; it cannot inherit a passing result from an
+obsolete pipeline or become green by deleting a regression.
+
 The initial median budgets are 500 ms for ASR, 500 ms for first TTS synthesis,
 2.5 seconds from endpoint to first audio, and 3 seconds estimated from the
 user's last voiced block to first audio. Interrupted turns remain visible in
