@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+thread=${1:-${ZERO_VOICE_THREAD:-${CODEX_THREAD_ID:-}}}
+if [ -z "$thread" ]; then
+    echo "usage: voice/simple-service THREAD_ID [simple-daemon options]" >&2
+    exit 2
+fi
+shift || true
+
+state=${XDG_STATE_HOME:-"$HOME/.local/state"}/zer0-voice
+mkdir -p "$state"
+
+exec "$root/voice/simple-daemon" \
+    --session "$thread" \
+    --cwd "$root" \
+    --output "${ZERO_VOICE_OUTPUT:-effect_input.aural_evolution}" \
+    --health "$state/health.json" \
+    --metrics "$state/simple-metrics.jsonl" \
+    "$@"

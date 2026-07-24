@@ -3,6 +3,7 @@ import subprocess
 import unittest
 import wave
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -40,6 +41,48 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(rate, 24_000)
         self.assertEqual(samples.shape, (2,))
         self.assertAlmostEqual(float(samples[1]), 32767 / 32768)
+
+    def test_transcribe_drops_decoder_no_speech_prompt_leakage(self):
+        class Model:
+            def transcribe(self, _audio, **_kwargs):
+                return (
+                    iter(
+                        (
+                            SimpleNamespace(
+                                text="JAX JAX JAX",
+                                no_speech_prob=0.93,
+                                avg_logprob=-1.8,
+                            ),
+                        )
+                    ),
+                    None,
+                )
+
+        self.assertEqual(
+            conversation.transcribe(Model(), np.ones(8, dtype=np.float32)),
+            "",
+        )
+
+    def test_transcribe_keeps_low_confidence_flag_when_speech_is_probable(self):
+        class Model:
+            def transcribe(self, _audio, **_kwargs):
+                return (
+                    iter(
+                        (
+                            SimpleNamespace(
+                                text="Can you hear me?",
+                                no_speech_prob=0.08,
+                                avg_logprob=-1.2,
+                            ),
+                        )
+                    ),
+                    None,
+                )
+
+        self.assertEqual(
+            conversation.transcribe(Model(), np.ones(8, dtype=np.float32)),
+            "Can you hear me?",
+        )
 
     def test_codex_turn_resumes_and_reads_output(self):
         def runner(command, **_kwargs):

@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Physical canary for one already-staged immutable bundle. The candidate owns
+# the microphone and reconstructs the entire duplex process after a worker or
+# watchdog failure. The separate simple service remains an operator-selected
+# fallback; silently degrading to it forever would make an active unit look like
+# healthy continuous mode.
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+bundle=${1:?usage: voice/candidate-service BUNDLE THREAD}
+thread=${2:?usage: voice/candidate-service BUNDLE THREAD}
+state=${ZERO_VOICE_STATE_DIR:-${XDG_STATE_HOME:-"$HOME/.local/state"}/zer0-voice}
+release_state=${ZERO_VOICE_RELEASE_STATE:-${XDG_STATE_HOME:-"$HOME/.local/state"}/zer0-voice/releases}
+health=${ZERO_VOICE_HEALTH:-$state/health.json}
+debug=${ZERO_VOICE_DEBUG:-$state/voice-debug.jsonl}
+metrics=${ZERO_VOICE_METRICS:-$root/bench/voice-history.jsonl}
+output=${ZERO_VOICE_OUTPUT:-effect_input.aural_evolution}
+relay=${ZERO_RELAY_URL:-http://127.0.0.1:8787}
+mic_mode=${ZERO_VOICE_MIC_MODE:-continuous}
+control_socket=${ZERO_VOICE_CONTROL_SOCKET:-${XDG_RUNTIME_DIR:-/tmp}/zer0-voice-control.sock}
+
+digest=${bundle##*/}
+python "$root/voice/release.py" \
+    --state "$release_state" verify "$digest" >/dev/null
+
+voice_pid=
+watchdog_pid=
+requested_stop=0
+stop() {
+    for pid in "$watchdog_pid" "$voice_pid"; do
+        if [ -n "$pid" ]; then
+            kill "$pid" 2>/dev/null || true
+        fi
+    done
+}
+terminate() {
+    requested_stop=1
+    stop
+}
+trap terminate INT TERM HUP
+
+failures=0
+while :; do
+    started=$SECONDS
+    "$bundle/voice/duplex" \
+        --session "$thread" \
+        --cwd "$root" \
+        --app-server shared \
+        --no-workspace-routing \
+        --kokoro-url "${ZERO_KOKORO_URL:-http://127.0.0.1:8880}" \
+        --committed-voice-url "$relay/v1/voice/committed" \
+        --pm-publisher candidate \
+        --input "${ZERO_VOICE_INPUT:-default}" \
+        --output "$output" \
+        --mic-mode "$mic_mode" \
+        --notification-mode conversational \
+        --live-model "${ZERO_VOICE_LIVE_MODEL:-gpt-5.6-luna}" \
+        --live-effort "${ZERO_VOICE_LIVE_EFFORT:-low}" \
+        --live-timeout "${ZERO_VOICE_LIVE_TIMEOUT:-35}" \
+        --live-acknowledgments \
+        --barge-in "${ZERO_VOICE_BARGE_IN:-final}" \
+        --startup-phrase "" \
+        --control-socket "$control_socket" \
+        --keyboard-indicator none \
+        --metrics "$metrics" \
+        --debug-events "$debug" \
+        --health "$health" &
+    voice_pid=$!
+
+    "$bundle/voice/watchdog.py" \
+        --pid "$voice_pid" \
+        --health "$health" \
+        --kokoro-health "${ZERO_KOKORO_URL:-http://127.0.0.1:8880}/health" &
+    watchdog_pid=$!
+
+    set +e
+    wait -n "$voice_pid" "$watchdog_pid"
+    status=$?
+    set -e
+    stop
+    wait "$voice_pid" 2>/dev/null || true
+    wait "$watchdog_pid" 2>/dev/null || true
+    voice_pid=
+    watchdog_pid=
+
+    if [ "$requested_stop" = 1 ]; then
+        exit 0
+    fi
+
+    runtime=$((SECONDS - started))
+    if [ "$runtime" -ge 30 ]; then
+        failures=0
+    fi
+    failures=$((failures + 1))
+    delay=$failures
+    if [ "$delay" -gt 10 ]; then
+        delay=10
+    fi
+    echo \
+        "duplex canary exited status=$status runtime=${runtime}s; restarting in ${delay}s" \
+        >&2
+    sleep "$delay"
+done

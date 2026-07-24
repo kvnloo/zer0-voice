@@ -41,9 +41,10 @@ class PeerLane(Protocol):
 
 
 class TurnBoard:
-    def __init__(self):
+    def __init__(self, on_steer=None):
         self._proposals: dict[str, Proposal] = {}
         self._superseded: set[str] = set()
+        self.on_steer = on_steer
 
     @property
     def version(self) -> int:
@@ -64,6 +65,11 @@ class TurnBoard:
         self._proposals[proposal.id] = proposal
         if proposal.supersedes:
             self._superseded.add(proposal.supersedes)
+            superseded = self._proposals[proposal.supersedes]
+            if self.on_steer is not None and superseded.lane != proposal.lane:
+                # One lane explicitly steering another is dashboard-visible
+                # hierarchy, not an implementation detail.
+                self.on_steer(proposal.lane, superseded.lane, proposal.topic)
         return True
 
     def active(self, topic: str | None = None) -> tuple[Proposal, ...]:
@@ -93,16 +99,17 @@ class TurnBoard:
 class DeliberationMesh:
     """Let every lane steer every other lane with a strict convergence bound."""
 
-    def __init__(self, lanes: list[PeerLane], *, max_rounds: int = 3):
+    def __init__(self, lanes: list[PeerLane], *, max_rounds: int = 3, on_steer=None):
         if max_rounds < 1:
             raise ValueError("max_rounds must be positive")
         self.lanes = tuple(lanes)
         self.max_rounds = max_rounds
+        self.on_steer = on_steer
 
     async def run(
         self, user_text: str, context: tuple[str, ...] = ()
     ) -> TurnBoard:
-        board = TurnBoard()
+        board = TurnBoard(on_steer=self.on_steer)
         seen_versions = {lane.name: -1 for lane in self.lanes}
         for _round in range(self.max_rounds):
             snapshot = board.active()

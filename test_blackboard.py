@@ -75,6 +75,39 @@ class BlackboardTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
+    def test_cross_lane_supersede_emits_explicit_steer_edge(self):
+        edges: list[tuple[str, str, str]] = []
+        board = TurnBoard(
+            on_steer=lambda steering, steered, topic: edges.append(
+                (steering, steered, topic)
+            )
+        )
+        live = Proposal("live", "spoken", "Initial answer", 0.6, Horizon.INSTANT)
+        board.publish(live)
+        correction = Proposal(
+            "high",
+            "spoken",
+            "Corrected answer",
+            0.9,
+            Horizon.MID,
+            supersedes=live.id,
+        )
+        board.publish(correction)
+        self.assertEqual(edges, [("high", "live", "spoken")])
+
+        # A lane refining its own proposal is not steering another lane.
+        board.publish(
+            Proposal(
+                "high",
+                "spoken",
+                "Refined answer",
+                0.95,
+                Horizon.MID,
+                supersedes=correction.id,
+            )
+        )
+        self.assertEqual(len(edges), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

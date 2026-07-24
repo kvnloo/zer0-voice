@@ -11,12 +11,14 @@ from pathlib import Path
 
 
 DEFAULT_BUDGETS = {
+    "speech_to_partial_seconds": 0.35,
     "asr_seconds": 0.50,
     "tts_first_seconds": 0.50,
     "audio_onset_after_endpoint_seconds": 2.50,
     "estimated_audio_onset_after_user_stop_seconds": 3.00,
 }
-PRODUCTION_PIPELINE = "codex-harness-pcm-v1"
+PRODUCTION_PIPELINE = "codex-continuous-pcm-v5"
+DEFAULT_MINIMUM_SAMPLES = 10
 
 
 def percentile(values: list[float], fraction: float) -> float:
@@ -31,24 +33,36 @@ def verify(
     minimum_samples: int = 1,
     budgets: dict[str, float] | None = None,
     pipeline: str | None = None,
+    run_id: str | None = None,
+    window_samples: int | None = None,
 ) -> dict[str, object]:
     budgets = budgets or DEFAULT_BUDGETS
-    selected = (
+    pipeline_rows = (
         [row for row in rows if row.get("pipeline") == pipeline]
         if pipeline
         else rows
     )
-    completed = [
+    selected = (
+        [row for row in pipeline_rows if row.get("run_id") == run_id]
+        if run_id
+        else pipeline_rows
+    )
+    completed_all = [
         row
         for row in selected
         if not row.get("interrupted")
         and all(isinstance(row.get(field), (int, float)) for field in budgets)
     ]
+    completed = (
+        completed_all[-window_samples:]
+        if window_samples is not None
+        else completed_all
+    )
     metrics: dict[str, dict[str, float]] = {}
     violations: list[str] = []
-    if len(completed) < minimum_samples:
+    if len(completed_all) < minimum_samples:
         violations.append(
-            f"completed samples {len(completed)} < required {minimum_samples}"
+            f"completed samples {len(completed_all)} < required {minimum_samples}"
         )
     for field, budget in budgets.items():
         values = [float(row[field]) for row in completed]
@@ -61,15 +75,17 @@ def verify(
             "p95": round(p95, 6),
             "budget": budget,
         }
-        if median > budget:
-            violations.append(f"{field} median {median:.6f} > {budget:.6f}")
+        if p95 > budget:
+            violations.append(f"{field} p95 {p95:.6f} > {budget:.6f}")
     return {
         "schema": 1,
         "ok": not violations,
         "pipeline": pipeline,
+        "run_id": run_id,
         "rows": len(selected),
         "ledger_rows": len(rows),
-        "completed_samples": len(completed),
+        "completed_samples": len(completed_all),
+        "gate_window_samples": len(completed),
         "interrupted_samples": sum(bool(row.get("interrupted")) for row in selected),
         "metrics": metrics,
         "violations": violations,
@@ -92,13 +108,18 @@ def main() -> int:
         nargs="?",
         default=Path(__file__).parents[1] / "bench/voice-history.jsonl",
     )
-    parser.add_argument("--minimum-samples", type=int, default=1)
+    parser.add_argument(
+        "--minimum-samples",
+        type=int,
+        default=DEFAULT_MINIMUM_SAMPLES,
+    )
     parser.add_argument("--pipeline", default=PRODUCTION_PIPELINE)
     args = parser.parse_args()
     result = verify(
         read_jsonl(args.ledger),
         minimum_samples=args.minimum_samples,
         pipeline=args.pipeline,
+        window_samples=args.minimum_samples,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result["ok"] else 1

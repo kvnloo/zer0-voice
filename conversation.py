@@ -114,16 +114,36 @@ def listen(config: ListenConfig, stop: threading.Event | None = None) -> np.ndar
         return segment_blocks(source(), config)
 
 
-def transcribe(model: "WhisperModel", audio: np.ndarray, language: str = "en") -> str:
+def transcribe(
+    model: "WhisperModel",
+    audio: np.ndarray,
+    language: str = "en",
+    *,
+    lexicon: Any | None = None,
+    accurate: bool = False,
+) -> str:
+    """Decode quickly for drafts or carefully for a committed utterance."""
     segments, _ = model.transcribe(
         audio,
         language=language,
-        beam_size=1,
+        beam_size=3 if accurate else 1,
+        best_of=3 if accurate else 1,
         vad_filter=False,
         condition_on_previous_text=False,
         without_timestamps=True,
+        initial_prompt=lexicon.prompt if lexicon else None,
+        hotwords=lexicon.hotwords if lexicon else None,
     )
-    return " ".join(segment.text.strip() for segment in segments).strip()
+    credible = (
+        segment
+        for segment in segments
+        if not (
+            (getattr(segment, "no_speech_prob", 0.0) or 0.0) > 0.60
+            and (getattr(segment, "avg_logprob", 0.0) or 0.0) < -1.0
+        )
+    )
+    text = " ".join(segment.text.strip() for segment in credible).strip()
+    return lexicon.correct(text) if lexicon else text
 
 
 def codex_turn(

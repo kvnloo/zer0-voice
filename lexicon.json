@@ -1,0 +1,29 @@
+{
+  "terms": [
+    "company operating system",
+    "everything is an issue",
+    "company",
+    "portfolio",
+    "product",
+    "project",
+    "feature",
+    "task",
+    "defect",
+    "autoresearch",
+    "human in the loop",
+    "Google Meet",
+    "infinite canvas",
+    "voice artifact",
+    "harness-native"
+  ],
+  "corrections": [
+    {
+      "pattern": "\\bcodecs harness\\b",
+      "replacement": "Codex harness"
+    },
+    {
+      "pattern": "\\bOh My P\\b",
+      "replacement": "OMP"
+    }
+  ]
+}

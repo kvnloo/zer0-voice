@@ -18,11 +18,11 @@ def context(*windows, focus=None):
         "tmux": [{"session": "0", "windows": list(windows)}],
     }
     if focus:
-        value["tmux_focus"] = {"pane_id": focus}
+        value["tmux_focus"] = focus if isinstance(focus, dict) else {"pane_id": focus}
     return value
 
 
-def window(index, project, pane, *, active_pane=True, active_window=False):
+def window(index, project, pane, *, active_pane=True, active_window=False, extra_panes=()):
     return {
         "index": str(index),
         "active": active_window,
@@ -34,8 +34,20 @@ def window(index, project, pane, *, active_pane=True, active_window=False):
                 "dead": False,
                 "command": "codex",
                 "project": project,
-            }
+            },
+            *extra_panes,
         ],
+    }
+
+
+def widget_pane(pane, project="pm", *, active=True):
+    return {
+        "id": pane,
+        "index": "2",
+        "active": active,
+        "dead": False,
+        "command": "python",
+        "project": project,
     }
 
 
@@ -76,6 +88,88 @@ class WorkspaceRouterTests(unittest.TestCase):
         self.assertIsNone(result.route)
         self.assertEqual(result.reason, "ambiguous_active_windows")
         self.assertEqual({item.project for item in result.candidates}, {"pm", "zerOS"})
+
+    def test_focused_widget_pane_attaches_to_harness_in_same_window(self):
+        result = resolve_context(
+            context(
+                window(1, "pm", "%1"),
+                window(
+                    4,
+                    "zerOS",
+                    "%6",
+                    active_pane=False,
+                    extra_panes=(widget_pane("%40", "zerOS"),),
+                ),
+                focus={"pane_id": "%40", "session": "0", "window": "4"},
+            ),
+            ROUTES,
+        )
+        self.assertEqual(result.reason, "focused_window")
+        self.assertEqual(result.route.pane_id, "%6")
+        self.assertEqual(result.route.project, "zerOS")
+
+    def test_ambiguous_focused_window_never_reroutes_to_background(self):
+        ambiguous = window(
+            2, "zerOS", "%6", active_pane=False, extra_panes=(widget_pane("%7", "zerOS"),)
+        )
+        ambiguous["panes"].append(
+            {
+                "id": "%8",
+                "index": "3",
+                "active": False,
+                "dead": False,
+                "command": "codex",
+                "project": "zerOS",
+            }
+        )
+        result = resolve_context(
+            context(
+                window(1, "pm", "%1"),
+                ambiguous,
+                focus={"pane_id": "%7", "session": "0", "window": "2"},
+            ),
+            ROUTES,
+        )
+        self.assertIsNone(result.route)
+        self.assertEqual(result.reason, "ambiguous_active_windows")
+        self.assertEqual({item.pane_id for item in result.candidates}, {"%6", "%8"})
+
+    def test_unfocused_harness_pane_still_routes_when_unique(self):
+        result = resolve_context(
+            context(
+                window(
+                    1,
+                    "pm",
+                    "%1",
+                    active_pane=False,
+                    extra_panes=(widget_pane("%40"),),
+                )
+            ),
+            ROUTES,
+        )
+        self.assertEqual(result.reason, "unique_active_harness")
+        self.assertEqual(result.route.project, "pm")
+
+    def test_pane_activity_breaks_tie_inside_one_window(self):
+        contested = window(
+            3, "pm", "%1", active_pane=True, extra_panes=(widget_pane("%2", "pm", active=False),)
+        )
+        contested["panes"].append(
+            {
+                "id": "%9",
+                "index": "3",
+                "active": False,
+                "dead": False,
+                "command": "codex",
+                "project": "pm",
+            }
+        )
+        result = resolve_context(
+            context(contested, focus={"pane_id": "%2", "session": "0", "window": "3"}),
+            ROUTES,
+        )
+        self.assertEqual(result.reason, "focused_window")
+        self.assertEqual(result.route.pane_id, "%1")
 
 class HarnessRouterTests(unittest.IsolatedAsyncioTestCase):
     async def test_focus_switch_gets_distinct_cached_harness_threads(self):

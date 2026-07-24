@@ -37,11 +37,11 @@ state="${XDG_STATE_HOME:-$HOME/.local/state}/zer0-voice"
 log="$state/$thread.log"
 mkdir -p "$(dirname -- "$log")"
 relay_pid=
-voice_pid=
+supervisor_pid=
 cleanup() {
-    if [ -n "$voice_pid" ]; then
-        kill "$voice_pid" 2>/dev/null || true
-        wait "$voice_pid" 2>/dev/null || true
+    if [ -n "$supervisor_pid" ]; then
+        kill "$supervisor_pid" 2>/dev/null || true
+        wait "$supervisor_pid" 2>/dev/null || true
     fi
     if [ -n "$relay_pid" ]; then
         kill "$relay_pid" 2>/dev/null || true
@@ -88,16 +88,71 @@ if ! curl -fsS --max-time 1 http://127.0.0.1:8787/healthz >/dev/null 2>&1; then
         sleep 0.1
     done
 fi
-"$root/voice/duplex" \
-    --session "$thread" \
-    --app-server shared \
-    --no-workspace-routing \
-    --kokoro-url "$kokoro_url" \
-    --input "${ZERO_VOICE_INPUT:-Blue Snowball}" \
-    --output "${ZERO_VOICE_OUTPUT:-effect_input.aural_evolution}" \
-    --metrics "$root/bench/voice-history.jsonl" \
-    --debug-events "$state/voice-debug.jsonl" \
-    >"$log" 2>&1 &
-voice_pid=$!
+
+supervise_voice() (
+    voice_child=
+    stop_voice() {
+        if [ -n "$voice_child" ]; then
+            kill "$voice_child" 2>/dev/null || true
+            wait "$voice_child" 2>/dev/null || true
+        fi
+    }
+    trap 'stop_voice; exit 0' INT TERM HUP
+    trap stop_voice EXIT
+    backoff=1
+    while :; do
+        started=$(date +%s)
+        "$root/voice/duplex" \
+            --session "$thread" \
+            --app-server shared \
+            --no-workspace-routing \
+            --kokoro-url "$kokoro_url" \
+            --input "${ZERO_VOICE_INPUT:-Blue Snowball}" \
+            --output "${ZERO_VOICE_OUTPUT:-effect_input.aural_evolution}" \
+            --mic-mode "${ZERO_VOICE_MIC_MODE:-continuous}" \
+            --notification-mode "${ZERO_VOICE_NOTIFICATION_MODE:-conversational}" \
+            --keyboard-indicator "${ZERO_WOOTING_INDICATOR:-none}" \
+            --metrics "$root/bench/voice-history.jsonl" \
+            --debug-events "$state/voice-debug.jsonl" \
+            >>"$log" 2>&1 &
+        voice_child=$!
+        if wait "$voice_child"; then
+            status=0
+        else
+            status=$?
+        fi
+        voice_child=
+        uptime=$(($(date +%s) - started))
+        if [ "$uptime" -ge 60 ]; then
+            backoff=1
+        fi
+        echo "voice exited status=$status; restarting in ${backoff}s" >&2
+        sleep "$backoff"
+        if [ "$backoff" -lt 8 ]; then
+            backoff=$((backoff * 2))
+        fi
+    done
+)
+
+supervise_voice &
+supervisor_pid=$!
+
+startup_timeout="${ZERO_VOICE_STARTUP_TIMEOUT_SECONDS:-30}"
+attempts=0
+max_attempts=$((startup_timeout * 4))
+while ! "$root/voice/control.py" status >/dev/null 2>&1; do
+    if ! kill -0 "$supervisor_pid" 2>/dev/null; then
+        wait "$supervisor_pid" 2>/dev/null || true
+        echo "voice supervisor exited before readiness; see $log" >&2
+        exit 1
+    fi
+    attempts=$((attempts + 1))
+    if [ "$attempts" -ge "$max_attempts" ]; then
+        echo "voice readiness timed out after ${startup_timeout}s; see $log" >&2
+        exit 1
+    fi
+    sleep 0.25
+done
+echo "voice ready: continuous capture and control handshake active" >&2
 
 codex --remote unix:// resume "$thread" "$@"
