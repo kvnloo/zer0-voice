@@ -17,6 +17,7 @@ from duplex import (
     adaptive_threshold,
     append_metric,
     next_final,
+    voice_control,
 )
 
 
@@ -29,7 +30,7 @@ class DuplexTests(unittest.TestCase):
             silence_ms=20,
             pre_roll_ms=10,
         )
-        detector = UtteranceDetector(config)
+        detector = UtteranceDetector(config, min_speech_ms=20)
         loud = np.full(config.block_size, 0.5, dtype=np.float32)
         quiet = np.zeros(config.block_size, dtype=np.float32)
         self.assertEqual(detector.push(loud), [])
@@ -38,6 +39,22 @@ class DuplexTests(unittest.TestCase):
         final = detector.push(quiet)
         self.assertEqual(final[0].kind, "speech.final")
         self.assertGreater(final[0].audio.size, 0)
+
+    def test_detector_discards_short_transient_after_speech_start(self):
+        config = ListenConfig(
+            block_ms=10,
+            threshold=0.1,
+            start_blocks=2,
+            silence_ms=20,
+            pre_roll_ms=10,
+        )
+        detector = UtteranceDetector(config, min_speech_ms=60)
+        loud = np.full(config.block_size, 0.5, dtype=np.float32)
+        quiet = np.zeros(config.block_size, dtype=np.float32)
+        detector.push(loud)
+        self.assertEqual(detector.push(loud)[0].kind, "speech.started")
+        self.assertEqual(detector.push(quiet), [])
+        self.assertEqual(detector.push(quiet), [])
 
     def test_sentence_chunker_speaks_complete_thoughts_early(self):
         chunker = SentenceChunker()
@@ -60,6 +77,23 @@ class DuplexTests(unittest.TestCase):
             append_metric(path, {"schema": 1, "route": "zerOS", "total_seconds": 2.0})
             rows = [json.loads(line) for line in path.read_text().splitlines()]
         self.assertEqual([row["route"] for row in rows], ["pm", "zerOS"])
+
+    def test_spoken_stop_is_exact_and_does_not_capture_task_language(self):
+        for phrase in (
+            "stop",
+            "stop please",
+            "can you stop please",
+            "please stop voice mode",
+            "quit listening",
+        ):
+            self.assertEqual(voice_control(phrase), "stop")
+        for phrase in (
+            "stop the server",
+            "can you stop ollama",
+            "how do I stop voice mode",
+            "do not stop",
+        ):
+            self.assertIsNone(voice_control(phrase))
 
     @patch("duplex.subprocess.Popen")
     def test_pipewire_player_streams_wav_to_explicit_sink(self, popen):

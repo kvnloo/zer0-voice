@@ -42,14 +42,32 @@ def append_metric(path: Path, metric: dict[str, object]) -> None:
         output.write(json.dumps(metric, separators=(",", ":"), sort_keys=True) + "\n")
 
 
+def voice_control(text: str) -> str | None:
+    normalized = re.sub(r"[^a-z]+", " ", text.lower()).strip()
+    stop = re.fullmatch(
+        r"(?:(?:can|could|would) you )?"
+        r"(?:please )?"
+        r"(?:stop|exit|quit)"
+        r"(?: (?:voice|voice mode|listening|conversation mode))?"
+        r"(?: please)?",
+        normalized,
+    )
+    return "stop" if stop else None
+
+
 class UtteranceDetector:
     """Stateful endpoint detector that reports speech start before final audio."""
 
-    def __init__(self, config: ListenConfig):
+    def __init__(self, config: ListenConfig, *, min_speech_ms: int = 180):
         self.config = config
+        self.min_voiced_blocks = max(
+            config.start_blocks,
+            (min_speech_ms + config.block_ms - 1) // config.block_ms,
+        )
         self.before: deque[np.ndarray] = deque(maxlen=config.pre_roll_blocks)
         self.utterance: list[np.ndarray] = []
         self.voiced = 0
+        self.active_voiced = 0
         self.silent = 0
         self.active = False
 
@@ -65,25 +83,29 @@ class UtteranceDetector:
             if self.voiced >= self.config.start_blocks:
                 self.active = True
                 self.utterance = list(self.before)
+                self.active_voiced = self.voiced
                 self.silent = 0
                 events.append(AudioEvent("speech.started"))
             return events
 
         self.utterance.append(block)
+        if voice:
+            self.active_voiced += 1
         self.silent = 0 if voice else self.silent + 1
         max_blocks = int(self.config.max_seconds * 1000 / self.config.block_ms)
         if self.silent >= self.config.silence_blocks or len(self.utterance) >= max_blocks:
             keep = max(0, len(self.utterance) - self.silent)
             audio = np.concatenate(self.utterance[:keep]) if keep else None
+            voiced_blocks = self.active_voiced
             self.reset()
-            if audio is not None:
+            if audio is not None and voiced_blocks >= self.min_voiced_blocks:
                 events.append(AudioEvent("speech.final", audio))
         return events
 
     def reset(self) -> None:
         self.before.clear()
         self.utterance = []
-        self.voiced = self.silent = 0
+        self.voiced = self.active_voiced = self.silent = 0
         self.active = False
 
 
@@ -641,6 +663,9 @@ async def run(args) -> None:
                 asr_seconds = time.monotonic() - asr_started
                 if not text:
                     continue
+                if voice_control(text) == "stop":
+                    print(f"You[control]: {text}\nStopping voice mode.", flush=True)
+                    break
                 binding = await harness_router.resolve(text)
                 print(f"You[{binding.key}]: {text}", flush=True)
                 history = histories[binding.key]
