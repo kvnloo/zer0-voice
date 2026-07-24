@@ -226,19 +226,22 @@ class AsyncDuplexTests(unittest.IsolatedAsyncioTestCase):
     async def test_codex_turn_is_the_only_source_of_spoken_text(self):
         calls = []
 
-        class Server:
-            async def stream_turn(self, thread, text, *, effort):
-                calls.append((thread, text, effort))
+        class Provider:
+            async def stream(self, text, *, context=(), effort=None):
+                calls.append((text, context, effort))
                 yield SimpleNamespace(
-                    kind="assistant.delta",
-                    payload={"text": "Exact harness response."},
-                    subject="turn:turn-1",
+                    kind="delta",
+                    text="Exact harness response.",
+                    turn_id="turn-1",
                 )
                 yield SimpleNamespace(
-                    kind="assistant.completed",
-                    payload={},
-                    subject="turn:turn-1",
+                    kind="completed",
+                    text="",
+                    turn_id="turn-1",
                 )
+
+            async def interrupt(self, turn_id):
+                raise AssertionError(f"turn {turn_id} should not be interrupted")
 
         class CapturingSpeaker:
             def __init__(self):
@@ -251,11 +254,11 @@ class AsyncDuplexTests(unittest.IsolatedAsyncioTestCase):
                 raise AssertionError("turn should not be interrupted")
 
         speaker = CapturingSpeaker()
-        turn = DuplexTurn(Server(), "current-harness", speaker)
+        turn = DuplexTurn(Provider(), speaker)
         response = await turn.run("Exact spoken transcript.", "high")
         self.assertEqual(
             calls,
-            [("current-harness", "Exact spoken transcript.", "high")],
+            [("Exact spoken transcript.", (), "high")],
         )
         self.assertEqual(response, "Exact harness response.")
         self.assertEqual(speaker.spoken, ["Exact harness response."])

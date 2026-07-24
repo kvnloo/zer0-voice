@@ -24,12 +24,14 @@ HERE = Path(__file__).resolve()
 sys.path[:0] = [
     str(HERE.parents[1] / "contracts"),
     str(HERE.parents[1] / "adapters/codex"),
+    str(HERE.parents[1] / "adapters/llm"),
 ]
 
 from app_server import AppServerError, CodexAppServer
 from conversation import ListenConfig, kokoro_wav, rms, transcribe
 from events import Event
 from preflight import preflight
+from providers import CodexSubscription, Provider
 from workspace_router import Route, WorkspaceRouter, load_routes
 
 
@@ -414,9 +416,8 @@ class Speaker:
 
 
 class DuplexTurn:
-    def __init__(self, server: CodexAppServer, thread: str, speaker: Speaker):
-        self.server = server
-        self.thread = thread
+    def __init__(self, provider: Provider, speaker: Speaker):
+        self.provider = provider
         self.speaker = speaker
         self.turn_id: str | None = None
 
@@ -426,10 +427,10 @@ class DuplexTurn:
 
         async def generate() -> None:
             chunker = SentenceChunker()
-            async for event in self.server.stream_turn(self.thread, text, effort=effort):
-                self.turn_id = event.subject.removeprefix("turn:")
-                if event.kind == "assistant.delta":
-                    delta = str(event.payload["text"])
+            async for event in self.provider.stream(text, effort=effort):
+                self.turn_id = event.turn_id
+                if event.kind == "delta":
+                    delta = event.text
                     response.append(delta)
                     for chunk in chunker.feed(delta):
                         await chunks.put(chunk)
@@ -447,7 +448,7 @@ class DuplexTurn:
     async def interrupt(self) -> None:
         self.speaker.interrupt()
         if self.turn_id:
-            await self.server.interrupt(self.thread, self.turn_id)
+            await self.provider.interrupt(self.turn_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -739,7 +740,10 @@ async def run(args) -> None:
                     output=args.output,
                     latency=args.playback_latency,
                 )
-                turn = DuplexTurn(server, binding.thread, speaker)
+                turn = DuplexTurn(
+                    CodexSubscription(server, binding.thread),
+                    speaker,
+                )
                 task = asyncio.create_task(turn.run(text, args.effort))
                 listen_task = asyncio.create_task(
                     next_final(
