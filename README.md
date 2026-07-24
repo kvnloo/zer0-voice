@@ -96,6 +96,15 @@ can route to the newly focused harness. Each routed project has isolated live
 history and deep insights, and its newest interactive Codex thread is resumed
 when available.
 
+The fast local lane starts speaking without waiting for the deeper Codex lane.
+After that response finishes, the microphone stays live while the runtime waits
+up to 15 seconds for a same-turn verified follow-up. The deep lane returns
+`NO_FOLLOWUP` for greetings, acknowledgements, and other turns that do not
+benefit from a second answer. A meaningful result is spoken immediately and is
+still interruptible with the normal sustained-speech policy. If a new utterance
+arrives first, it wins the race and is routed using the newly active harness;
+use `--deep-followup-wait` to tune the bounded idle wait.
+
 For a resolved Codex harness, the router also reads a bounded snapshot of the
 eight most recent user/assistant messages (maximum 4,000 characters). Tool
 commands, tool output, approvals, and other item types are excluded. Refresh has
