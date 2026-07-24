@@ -45,6 +45,7 @@ while :; do
     started=$SECONDS
     "$bundle/voice/duplex" \
         --session "$thread" \
+        --release-bundle "$digest" \
         --cwd "$root" \
         --app-server shared \
         --no-workspace-routing \

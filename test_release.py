@@ -77,6 +77,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn('ZERO_VOICE_CONTROL_SOCKET', wrapper)
         self.assertIn('ZERO_VOICE_STATE_DIR', wrapper)
         self.assertIn('ZERO_VOICE_RELEASE_STATE', wrapper)
+        self.assertIn('--release-bundle "$digest"', wrapper)
 
     def test_production_buffers_followup_speech_and_has_no_startup_chatter(self):
         root = Path(__file__).resolve().parents[1]
