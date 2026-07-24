@@ -50,6 +50,25 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM HUP
 
+kokoro_url="${ZERO_KOKORO_URL:-http://127.0.0.1:8880}"
+kokoro_launcher="${ZERO_KOKORO_LAUNCHER:-/workspace/kokoro-tts/kokoro.sh}"
+if ! curl -fsS --max-time 1 "$kokoro_url/health" >/dev/null 2>&1; then
+    if [ ! -x "$kokoro_launcher" ]; then
+        echo "Kokoro is offline and launcher is unavailable: $kokoro_launcher" >&2
+        exit 1
+    fi
+    "$kokoro_launcher" start
+    attempts=0
+    until curl -fsS --max-time 1 "$kokoro_url/health" >/dev/null 2>&1; do
+        attempts=$((attempts + 1))
+        if [ "$attempts" -ge 300 ]; then
+            echo "Kokoro did not become ready at $kokoro_url; run: $kokoro_launcher log" >&2
+            exit 1
+        fi
+        sleep 0.1
+    done
+fi
+
 if ! curl -fsS --max-time 1 http://127.0.0.1:8787/healthz >/dev/null 2>&1; then
     if [ ! -x "$root/core/target/release/zer0d" ]; then
         cargo build --release --manifest-path "$root/core/Cargo.toml" --bin zer0d
@@ -73,6 +92,7 @@ fi
     --session "$thread" \
     --app-server shared \
     --no-workspace-routing \
+    --kokoro-url "$kokoro_url" \
     --input "${ZERO_VOICE_INPUT:-Blue Snowball}" \
     --output "${ZERO_VOICE_OUTPUT:-effect_input.aural_evolution}" \
     --metrics "$root/bench/voice-history.jsonl" \

@@ -91,7 +91,9 @@ launch both clients against Codex's managed app-server:
 
 This resumes the TUI through `codex --remote unix://`, starts `duplex` against
 the daemon proxy, pins voice to that exact thread, and stops the microphone when
-the TUI exits. Voice logs go to
+the TUI exits. The launcher health-checks Kokoro and, when it is offline, starts
+the existing global service through `/workspace/kokoro-tts/kokoro.sh`; override
+that path with `ZERO_KOKORO_LAUNCHER`. Voice logs go to
 `$XDG_STATE_HOME/zer0-voice/THREAD_ID.log` (or
 `~/.local/state/zer0-voice/THREAD_ID.log`). `ZERO_VOICE_INPUT` and
 `ZERO_VOICE_OUTPUT` override the default Blue Snowball and Aural Evolution
