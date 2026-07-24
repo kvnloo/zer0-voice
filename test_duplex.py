@@ -34,7 +34,11 @@ class DuplexTests(unittest.TestCase):
         loud = np.full(config.block_size, 0.5, dtype=np.float32)
         quiet = np.zeros(config.block_size, dtype=np.float32)
         self.assertEqual(detector.push(loud), [])
-        self.assertEqual(detector.push(loud)[0].kind, "speech.started")
+        started = detector.push(loud)
+        self.assertEqual(
+            [event.kind for event in started],
+            ["speech.started", "speech.confirmed"],
+        )
         self.assertEqual(detector.push(quiet), [])
         final = detector.push(quiet)
         self.assertEqual(final[0].kind, "speech.final")
@@ -55,6 +59,28 @@ class DuplexTests(unittest.TestCase):
         self.assertEqual(detector.push(loud)[0].kind, "speech.started")
         self.assertEqual(detector.push(quiet), [])
         self.assertEqual(detector.push(quiet), [])
+
+    def test_detector_confirms_only_after_sustained_voice(self):
+        config = ListenConfig(
+            block_ms=10,
+            threshold=0.1,
+            start_blocks=2,
+            silence_ms=20,
+            pre_roll_ms=10,
+        )
+        detector = UtteranceDetector(config, min_speech_ms=60)
+        loud = np.full(config.block_size, 0.5, dtype=np.float32)
+        self.assertEqual(detector.push(loud), [])
+        self.assertEqual(
+            [event.kind for event in detector.push(loud)],
+            ["speech.started"],
+        )
+        for _ in range(3):
+            self.assertEqual(detector.push(loud), [])
+        self.assertEqual(
+            [event.kind for event in detector.push(loud)],
+            ["speech.confirmed"],
+        )
 
     def test_sentence_chunker_speaks_complete_thoughts_early(self):
         chunker = SentenceChunker()
@@ -129,6 +155,7 @@ class AsyncDuplexTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self):
                 self.events = [
                     AudioEvent("speech.started"),
+                    AudioEvent("speech.confirmed"),
                     AudioEvent("speech.final", np.ones(16, dtype=np.float32)),
                 ]
 
@@ -143,8 +170,36 @@ class AsyncDuplexTests(unittest.IsolatedAsyncioTestCase):
                 self.interrupted.set()
 
         turn = Turn()
-        audio = await next_final(Mic(), turn, interrupt_on_start=True)
+        audio = await next_final(Mic(), turn, interrupt_mode="immediate")
         self.assertTrue(turn.interrupted.is_set())
+        self.assertEqual(audio.size, 16)
+
+    async def test_sustained_barge_in_waits_for_confirmation(self):
+        class Mic:
+            def __init__(self):
+                self.events = [
+                    AudioEvent("speech.started"),
+                    AudioEvent("speech.confirmed"),
+                    AudioEvent("speech.final", np.ones(16, dtype=np.float32)),
+                ]
+                self.reads = 0
+
+            async def next(self):
+                self.reads += 1
+                return self.events.pop(0)
+
+        class Turn:
+            def __init__(self, mic):
+                self.mic = mic
+                self.interrupted_at = None
+
+            async def interrupt(self):
+                self.interrupted_at = self.mic.reads
+
+        mic = Mic()
+        turn = Turn(mic)
+        audio = await next_final(mic, turn, interrupt_mode="sustained")
+        self.assertEqual(turn.interrupted_at, 2)
         self.assertEqual(audio.size, 16)
 
     async def test_default_barge_in_waits_for_final_to_avoid_echo_cutoff(self):
@@ -152,6 +207,7 @@ class AsyncDuplexTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self):
                 self.events = [
                     AudioEvent("speech.started"),
+                    AudioEvent("speech.confirmed"),
                     AudioEvent("speech.final", np.ones(16, dtype=np.float32)),
                 ]
 

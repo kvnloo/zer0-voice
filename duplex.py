@@ -71,6 +71,7 @@ class UtteranceDetector:
         self.active_voiced = 0
         self.silent = 0
         self.active = False
+        self.confirmed = False
 
     def push(self, block: np.ndarray) -> list[AudioEvent]:
         block = np.asarray(block, dtype=np.float32).reshape(-1)
@@ -87,11 +88,20 @@ class UtteranceDetector:
                 self.active_voiced = self.voiced
                 self.silent = 0
                 events.append(AudioEvent("speech.started"))
+                if self.active_voiced >= self.min_voiced_blocks:
+                    self.confirmed = True
+                    events.append(AudioEvent("speech.confirmed"))
             return events
 
         self.utterance.append(block)
         if voice:
             self.active_voiced += 1
+            if (
+                not self.confirmed
+                and self.active_voiced >= self.min_voiced_blocks
+            ):
+                self.confirmed = True
+                events.append(AudioEvent("speech.confirmed"))
         self.silent = 0 if voice else self.silent + 1
         max_blocks = int(self.config.max_seconds * 1000 / self.config.block_ms)
         if self.silent >= self.config.silence_blocks or len(self.utterance) >= max_blocks:
@@ -108,6 +118,7 @@ class UtteranceDetector:
         self.utterance = []
         self.voiced = self.active_voiced = self.silent = 0
         self.active = False
+        self.confirmed = False
 
 
 def adaptive_threshold(levels: np.ndarray) -> float:
@@ -562,11 +573,16 @@ async def next_final(
     mic: Microphone,
     turn: DuplexTurn | LiveTurn | None = None,
     *,
-    interrupt_on_start: bool = False,
+    interrupt_mode: str = "final",
 ) -> np.ndarray:
     while True:
         event = await mic.next()
-        if event.kind == "speech.started" and turn and interrupt_on_start:
+        should_interrupt = (
+            interrupt_mode == "immediate" and event.kind == "speech.started"
+        ) or (
+            interrupt_mode == "sustained" and event.kind == "speech.confirmed"
+        )
+        if turn and should_interrupt:
             await turn.interrupt()
         if event.kind == "speech.final" and event.audio is not None:
             return event.audio
@@ -713,7 +729,7 @@ async def run(args) -> None:
                     next_final(
                         mic,
                         turn,
-                        interrupt_on_start=args.barge_in == "immediate",
+                        interrupt_mode=args.barge_in,
                     )
                 )
                 done, _ = await asyncio.wait(
@@ -827,9 +843,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--barge-in",
-        default="final",
-        choices=("final", "immediate"),
-        help="final avoids false echo interruptions; immediate yields on speech start",
+        default="sustained",
+        choices=("final", "sustained", "immediate"),
+        help="sustained yields after confirmed speech; final/immediate are explicit alternatives",
     )
     parser.add_argument("--input", help="sounddevice input index or device-name match")
     parser.add_argument(

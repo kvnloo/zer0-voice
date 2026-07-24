@@ -58,6 +58,13 @@ overlap, yields for corrections/questions, and can briefly hold the floor for an
 important or safety-critical thought. Its adaptive endpoint tolerates reflective
 pauses instead of treating every silence as the end of a turn.
 
+The production duplex runtime defaults to `--barge-in sustained`: it notices
+speech onset immediately but cancels playback only after roughly 180 ms of
+continued voice. This rejects clicks, breaths, and short echo transients without
+forcing a real interruption to wait for the utterance endpoint. Use
+`--barge-in immediate` or `--barge-in final` only for explicit testing or
+environment-specific tuning.
+
 The simple `conversation` executable still speaks after a Codex turn completes.
 `duplex` is the production local loop: it keeps the microphone open while Codex
 and Kokoro speak, streams authenticated Codex app-server deltas into sentence
