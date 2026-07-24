@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_HEARTBEAT_TIMEOUT_SECONDS = 5.0
+DEFAULT_CAPTURE_TIMEOUT_SECONDS = 3.0
 DEFAULT_PHASE_DEADLINES_SECONDS = {
     "starting": 180.0,
     "attaching": 20.0,
@@ -38,6 +39,7 @@ def assess(
     *,
     now_ns: int | None = None,
     heartbeat_timeout_seconds: float = DEFAULT_HEARTBEAT_TIMEOUT_SECONDS,
+    capture_timeout_seconds: float = DEFAULT_CAPTURE_TIMEOUT_SECONDS,
     phase_deadlines_seconds: dict[str, float] | None = None,
 ) -> tuple[bool, str]:
     """Return functional health without inspecting transcript or response text."""
@@ -50,6 +52,16 @@ def assess(
     age = max(0.0, (now_ns - updated_ns) / 1_000_000_000)
     if age > heartbeat_timeout_seconds:
         return False, f"heartbeat-stale:{age:.1f}s"
+    if snapshot.get("capture_expected") is True:
+        capture_updated_ns = int(snapshot.get("capture_updated_ns", 0))
+        if capture_updated_ns <= 0:
+            return False, "capture-missing"
+        capture_age = max(
+            0.0,
+            (now_ns - capture_updated_ns) / 1_000_000_000,
+        )
+        if capture_age > capture_timeout_seconds:
+            return False, f"capture-stalled:{capture_age:.1f}s"
     phase = str(snapshot.get("phase", "unknown"))
     deadlines = phase_deadlines_seconds or DEFAULT_PHASE_DEADLINES_SECONDS
     deadline = deadlines.get(phase)
@@ -72,6 +84,9 @@ class RuntimeHealth:
     revision: int = 0
     lane: str = "runtime"
     reason: str = ""
+    capture_expected: bool = False
+    capture_frames: int = 0
+    capture_updated_ns: int = 0
     _lock: threading.Lock = field(
         default_factory=threading.Lock,
         init=False,
@@ -102,6 +117,22 @@ class RuntimeHealth:
         with self._lock:
             self._touch_unlocked()
 
+    def expect_capture(self, expected: bool) -> None:
+        """Declare whether audio callbacks must currently make progress."""
+        with self._lock:
+            if expected and not self.capture_expected:
+                self.capture_updated_ns = time.time_ns()
+            self.capture_expected = expected
+            self._touch_unlocked()
+
+    def captured(self, frames: int) -> None:
+        """Record callback progress in memory; the heartbeat publishes it."""
+        if frames <= 0:
+            return
+        with self._lock:
+            self.capture_frames += frames
+            self.capture_updated_ns = time.time_ns()
+
     def _touch_unlocked(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         snapshot = {
@@ -111,6 +142,9 @@ class RuntimeHealth:
             "phase": self.phase,
             "lane": self.lane,
             "reason": self.reason,
+            "capture_expected": self.capture_expected,
+            "capture_frames": self.capture_frames,
+            "capture_updated_ns": self.capture_updated_ns,
             "phase_since_ns": self.phase_since_ns,
             "updated_ns": time.time_ns(),
             "revision": self.revision,

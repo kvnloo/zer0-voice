@@ -418,7 +418,13 @@ class SentenceChunker:
 
 
 class Microphone:
-    def __init__(self, config: ListenConfig, *, device: str | int | None = None):
+    def __init__(
+        self,
+        config: ListenConfig,
+        *,
+        device: str | int | None = None,
+        health: RuntimeHealth | None = None,
+    ):
         self.config = config
         self.device = device
         self.detector = UtteranceDetector(config)
@@ -426,6 +432,7 @@ class Microphone:
         self.stream = None
         self.loop: asyncio.AbstractEventLoop | None = None
         self.stream_generation = 0
+        self.health = health
 
     def _process_block(
         self,
@@ -435,6 +442,8 @@ class Microphone:
     ) -> None:
         if generation != self.stream_generation or self.stream is None:
             return
+        if self.health:
+            self.health.captured(len(block))
         if warning:
             self.queue.put_nowait(AudioEvent("audio.warning", detail=warning))
         for event in self.detector.push(block):
@@ -467,8 +476,12 @@ class Microphone:
             callback=callback,
         )
         self.stream.start()
+        if self.health:
+            self.health.expect_capture(True)
 
     def close(self) -> None:
+        if self.health:
+            self.health.expect_capture(False)
         self.stream_generation += 1
         if self.stream:
             self.stream.stop()
@@ -482,6 +495,8 @@ class Microphone:
                 break
 
     def pause(self, *, finalize: bool = False) -> AudioEvent | None:
+        if self.health:
+            self.health.expect_capture(False)
         self.stream_generation += 1
         event = self.detector.finish() if finalize else None
         if self.stream:
@@ -1465,7 +1480,7 @@ async def run(args) -> None:
             seconds=args.calibration_seconds,
         )
     config = ListenConfig(threshold=threshold, silence_ms=args.silence_ms)
-    mic = Microphone(config, device=args.input)
+    mic = Microphone(config, device=args.input, health=health)
     control = VoiceControl(
         VoiceModes(
             mic=MicMode(args.mic_mode),
