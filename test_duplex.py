@@ -48,8 +48,10 @@ class DuplexTests(unittest.TestCase):
     def test_adaptive_threshold_tracks_noise_with_safe_bounds(self):
         self.assertEqual(adaptive_threshold(np.array([])), 0.018)
         self.assertEqual(adaptive_threshold(np.full(10, 0.0001)), 0.004)
-        self.assertAlmostEqual(adaptive_threshold(np.full(10, 0.003)), 0.009)
-        self.assertEqual(adaptive_threshold(np.full(10, 0.2)), 0.03)
+        self.assertAlmostEqual(adaptive_threshold(np.full(10, 0.003)), 0.0075)
+        self.assertEqual(adaptive_threshold(np.full(10, 0.2)), 0.02)
+        transient = np.array([0.003] * 9 + [0.4])
+        self.assertAlmostEqual(adaptive_threshold(transient), 0.0075)
 
     def test_metric_ledger_is_append_only_jsonl(self):
         with tempfile.TemporaryDirectory() as directory:

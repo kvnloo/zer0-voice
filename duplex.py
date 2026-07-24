@@ -92,8 +92,9 @@ def adaptive_threshold(levels: np.ndarray) -> float:
     values = np.asarray(levels, dtype=np.float32).reshape(-1)
     if not values.size:
         return 0.018
-    noise = float(np.percentile(values, 95))
-    return min(0.03, max(0.004, noise * 3.0))
+    # Median rejects a cough, keypress, or startup transient in the short sample.
+    noise = float(np.median(values))
+    return min(0.02, max(0.004, noise * 2.5))
 
 
 def calibrate_microphone(
