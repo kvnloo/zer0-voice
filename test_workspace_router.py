@@ -130,6 +130,46 @@ class HarnessRouterTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_spoken_pin_routes_until_follow_focus(self):
+        pm = Route("pm", ROUTES["pm"], "%1", "0", "1")
+
+        class Workspace:
+            routes = ROUTES
+
+            def resolve(self):
+                return Resolution(pm, "focused_pane", (pm,))
+
+        class Server:
+            async def list_threads(self, cwd):
+                return [{"id": f"native-{cwd.name}"}]
+
+            async def resume_thread(self, thread, **_kwargs):
+                return thread
+
+            async def start_thread(self, **_kwargs):
+                raise AssertionError
+
+        async def inline(function, *args, **kwargs):
+            return function(*args, **kwargs)
+
+        router = HarnessRouter(
+            Server(),
+            Workspace(),
+            "fallback",
+            instructions="voice",
+            timeout=1,
+        )
+        from unittest.mock import patch
+
+        with patch("duplex.asyncio.to_thread", new=inline):
+            pinned = await router.resolve("switch to zerOS")
+            still_pinned = await router.resolve("what are we building")
+            focused = await router.resolve("follow focus")
+        self.assertEqual(pinned.key, "zerOS")
+        self.assertEqual(pinned.reason, "spoken_pin")
+        self.assertEqual(still_pinned.key, "zerOS")
+        self.assertEqual(focused.key, "pm")
+
 
 if __name__ == "__main__":
     unittest.main()

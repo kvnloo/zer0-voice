@@ -89,6 +89,10 @@ Full window-to-window switching therefore requires `workspace-copilot` context
 to expose either `tmux_focus.pane_id` or an `active` bit on the displayed tmux
 window; raw pane contents and window titles are never inspected.
 
+When focus is ambiguous, routing remains hands-free: say `switch to zerOS`,
+`talk to PM`, `route to Flowkit`, or `talk to dotfiles` to pin subsequent
+turns. Say `follow focus` to return to automatic workspace routing.
+
 `fleet.py` implements the parallel intelligence hierarchy. The default profile
 is five total lanes: one live voice generator plus instant, medium, high, and
 pro reasoning lanes. Instant and medium run every turn; high and pro use a

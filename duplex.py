@@ -419,10 +419,59 @@ class HarnessRouter:
         self.instructions = instructions
         self.timeout = timeout
         self.bindings: dict[str, ThreadBinding] = {}
+        self.pinned_project: str | None = None
 
-    async def resolve(self) -> ThreadBinding:
+    def _voice_route(self, text: str) -> Route | None:
+        if self.workspace is None:
+            return None
+        normalized = re.sub(r"[^a-z0-9.]+", " ", text.lower()).strip()
+        if re.search(r"\b(?:follow|use) (?:the )?focus\b", normalized):
+            self.pinned_project = None
+            print("Voice routing returned to workspace focus.", flush=True)
+            return None
+        aliases = {
+            "pm": "pm",
+            "product manager": "pm",
+            "zeros": "zerOS",
+            "zero s": "zerOS",
+            "flowkit": "flowkit",
+            "dotfiles": ".files",
+            "files": ".files",
+        }
+        command = re.search(
+            r"\b(?:switch|route|talk)(?: me)? to ([a-z0-9. ]+?)(?: please)?$",
+            normalized,
+        )
+        if command:
+            requested = aliases.get(command.group(1).strip())
+            if requested and requested in self.workspace.routes:
+                self.pinned_project = requested
+                print(f"Voice routing pinned to {requested}.", flush=True)
+        if self.pinned_project:
+            return Route(
+                project=self.pinned_project,
+                cwd=self.workspace.routes[self.pinned_project],
+                pane_id="voice-pin",
+                session="",
+                window="",
+            )
+        return None
+
+    async def resolve(self, text: str = "") -> ThreadBinding:
         if self.workspace is None:
             return ThreadBinding("default", self.fallback_thread, None, "fixed")
+        if route := self._voice_route(text):
+            if route.project in self.bindings:
+                binding = self.bindings[route.project]
+                return ThreadBinding(
+                    binding.key,
+                    binding.thread,
+                    route,
+                    "spoken_pin",
+                )
+            binding = await self._attach(route, "spoken_pin")
+            self.bindings[route.project] = binding
+            return binding
         try:
             resolution = await asyncio.to_thread(self.workspace.resolve)
         except Exception as exc:
@@ -591,7 +640,7 @@ async def run(args) -> None:
                 asr_seconds = time.monotonic() - asr_started
                 if not text:
                     continue
-                binding = await harness_router.resolve()
+                binding = await harness_router.resolve(text)
                 print(f"You[{binding.key}]: {text}", flush=True)
                 history = histories[binding.key]
                 route_note = (
