@@ -26,6 +26,7 @@ from duplex import (
     append_metric,
     collect_owned_transcript,
     mark_capture_active,
+    needs_startup_calibration,
     next_final,
     next_controlled_final,
     race_response_and_capture,
@@ -258,6 +259,12 @@ class DuplexTests(unittest.TestCase):
         self.assertEqual(adaptive_threshold(np.full(10, 0.2)), 0.02)
         transient = np.array([0.003] * 9 + [0.4])
         self.assertAlmostEqual(adaptive_threshold(transient), 0.0075)
+
+    def test_closed_startup_modes_do_not_open_audio_for_calibration(self):
+        self.assertFalse(needs_startup_calibration(None, "muted"))
+        self.assertFalse(needs_startup_calibration(None, "push-to-talk"))
+        self.assertTrue(needs_startup_calibration(None, "continuous"))
+        self.assertFalse(needs_startup_calibration(0.01, "continuous"))
 
     def test_metric_ledger_is_append_only_jsonl(self):
         with tempfile.TemporaryDirectory() as directory:

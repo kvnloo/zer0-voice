@@ -367,6 +367,14 @@ def adaptive_threshold(levels: np.ndarray) -> float:
     return min(0.02, max(0.004, noise * 2.5))
 
 
+def needs_startup_calibration(
+    threshold: float | None,
+    mic_mode: str,
+) -> bool:
+    """Open audio for calibration only when startup capture is intentional."""
+    return threshold is None and MicMode(mic_mode) is MicMode.CONTINUOUS
+
+
 def calibrate_microphone(
     *,
     device: str | int | None,
@@ -1480,7 +1488,7 @@ async def run(args) -> None:
     base_config = ListenConfig(silence_ms=args.silence_ms)
     threshold = args.threshold
     input_name = "system default"
-    if threshold is None:
+    if needs_startup_calibration(threshold, args.mic_mode):
         threshold, input_name = await asyncio.to_thread(
             calibrate_microphone,
             device=args.input,
@@ -1488,6 +1496,9 @@ async def run(args) -> None:
             block_size=base_config.block_size,
             seconds=args.calibration_seconds,
         )
+    elif threshold is None:
+        threshold = base_config.threshold
+        input_name = f"deferred ({args.mic_mode})"
     config = ListenConfig(threshold=threshold, silence_ms=args.silence_ms)
     mic = Microphone(config, device=args.input, health=health)
     control = VoiceControl(
