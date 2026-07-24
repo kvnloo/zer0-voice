@@ -434,6 +434,44 @@ class ThreadBinding:
     thread: str
     route: Route | None
     reason: str
+    context: tuple[str, ...] = ()
+
+
+def codex_thread_context(
+    thread: dict[str, object],
+    *,
+    messages: int = 8,
+    character_budget: int = 4000,
+) -> tuple[str, ...]:
+    extracted: list[str] = []
+    for turn in thread.get("turns", ()) if isinstance(thread, dict) else ():
+        for item in turn.get("items", ()) if isinstance(turn, dict) else ():
+            if not isinstance(item, dict):
+                continue
+            kind = item.get("type")
+            if kind == "userMessage":
+                parts = [
+                    part.get("text", "")
+                    for part in item.get("content", ())
+                    if isinstance(part, dict) and part.get("type") == "text"
+                ]
+                text = " ".join(part for part in parts if part).strip()
+                role = "user"
+            elif kind == "agentMessage":
+                text = str(item.get("text", "")).strip()
+                role = "assistant"
+            else:
+                continue
+            if text:
+                extracted.append(f"{role}: {text}")
+    selected: deque[str] = deque()
+    used = 0
+    for item in reversed(extracted):
+        if selected and (len(selected) >= messages or used + len(item) > character_budget):
+            break
+        selected.appendleft(item[-character_budget:])
+        used += len(item)
+    return tuple(selected)
 
 
 class HarnessRouter:
@@ -498,15 +536,17 @@ class HarnessRouter:
         if route := self._voice_route(text):
             if route.project in self.bindings:
                 binding = self.bindings[route.project]
-                return ThreadBinding(
+                binding = ThreadBinding(
                     binding.key,
                     binding.thread,
                     route,
                     "spoken_pin",
+                    binding.context,
                 )
+                return await self._refresh(binding)
             binding = await self._attach(route, "spoken_pin")
             self.bindings[route.project] = binding
-            return binding
+            return await self._refresh(binding)
         try:
             resolution = await asyncio.to_thread(self.workspace.resolve)
         except Exception as exc:
@@ -526,10 +566,28 @@ class HarnessRouter:
             )
         route = resolution.route
         if route.project in self.bindings:
-            return self.bindings[route.project]
+            return await self._refresh(self.bindings[route.project])
         binding = await self._attach(route, resolution.reason)
         self.bindings[route.project] = binding
-        return binding
+        return await self._refresh(binding)
+
+    async def _refresh(self, binding: ThreadBinding) -> ThreadBinding:
+        try:
+            thread = await asyncio.wait_for(
+                self.server.read_thread(binding.thread),
+                timeout=min(self.timeout, 0.25),
+            )
+        except (TimeoutError, AppServerError, KeyError):
+            return binding
+        refreshed = ThreadBinding(
+            binding.key,
+            binding.thread,
+            binding.route,
+            binding.reason,
+            codex_thread_context(thread),
+        )
+        self.bindings[binding.key] = refreshed
+        return refreshed
 
     async def _attach(self, route: Route, reason: str) -> ThreadBinding:
         try:
@@ -712,7 +770,11 @@ async def run(args) -> None:
                     f"Routing reason: {binding.reason}. Keep the response scoped to "
                     "that project and do not claim work in another harness."
                 )
-                context = (route_note,) + tuple(history) + tuple(
+                harness_context = tuple(
+                    f"system: Recent selected-harness context: {item}"
+                    for item in binding.context
+                )
+                context = (route_note,) + harness_context + tuple(history) + tuple(
                     f"deep: {x}" for x in deep.insights[binding.key]
                 )
                 deep.submit(binding.key, binding.thread, text, context)

@@ -96,6 +96,12 @@ can route to the newly focused harness. Each routed project has isolated live
 history and deep insights, and its newest interactive Codex thread is resumed
 when available.
 
+For a resolved Codex harness, the router also reads a bounded snapshot of the
+eight most recent user/assistant messages (maximum 4,000 characters). Tool
+commands, tool output, approvals, and other item types are excluded. Refresh has
+a 250 ms ceiling and falls back to the last cached snapshot, so harness context
+improves the live reply without becoming an unbounded latency gate.
+
 Project paths are configured in `voice/routes.json`. Disable routing with
 `--no-workspace-routing`, or pin the deep lane with `--session THREAD_ID`.
 Routing fails closed to the launch-context thread when the sanitized workspace
