@@ -1482,6 +1482,7 @@ async def run(args) -> None:
             output_device=args.output,
             workspace_routing=args.workspace_routing,
             routes=args.routes,
+            require_input=MicMode(args.mic_mode) is not MicMode.MUTED,
         )
         print(json.dumps(report, indent=2, sort_keys=True), flush=True)
         if not report["ok"]:

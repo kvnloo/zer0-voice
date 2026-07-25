@@ -1,6 +1,8 @@
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
-from preflight import matching_device, parse_pulse_sinks
+from preflight import matching_device, parse_pulse_sinks, preflight
 
 
 DEVICES = [
@@ -10,6 +12,34 @@ DEVICES = [
 
 
 class PreflightTests(unittest.TestCase):
+    @patch("preflight.tts_health", return_value={"ok": True})
+    @patch(
+        "preflight.asr_health",
+        return_value={"ok": True},
+    )
+    @patch("preflight.subprocess.run")
+    def test_muted_candidate_defers_input_discovery(
+        self,
+        run,
+        _asr,
+        _tts,
+    ):
+        run.return_value.returncode = 0
+        run.return_value.stdout = "1\n"
+        report = preflight(
+            whisper_python="python",
+            kokoro_url="http://kokoro",
+            ollama_url=None,
+            live_model=None,
+            input_device="owned production microphone",
+            output_device=None,
+            workspace_routing=False,
+            routes=Path("/unused"),
+            require_input=False,
+        )
+        self.assertTrue(report["checks"]["input"]["ok"])
+        self.assertTrue(report["checks"]["input"]["deferred"])
+
     def test_device_matching_is_directional_and_case_insensitive(self):
         self.assertEqual(
             matching_device(DEVICES, "snowBALL", "input")["name"],

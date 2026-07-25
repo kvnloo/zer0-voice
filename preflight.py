@@ -50,6 +50,7 @@ def preflight(
     output_device: str | None,
     workspace_routing: bool,
     routes: Path,
+    require_input: bool = True,
 ) -> dict[str, object]:
     checks: dict[str, object] = {}
     failures: list[str] = []
@@ -106,21 +107,29 @@ def preflight(
             checks["live_model"] = {"ok": False, "url": ollama_url, "error": str(exc)}
             failures.append("Ollama is unreachable")
 
-    try:
-        import sounddevice as sd
-
-        devices = [dict(device) for device in sd.query_devices()]
-        selected_input = matching_device(devices, input_device, "input")
+    if not require_input:
         checks["input"] = {
-            "ok": selected_input is not None,
+            "ok": True,
             "requested": input_device,
-            "selected": selected_input.get("name") if selected_input else None,
+            "selected": None,
+            "deferred": True,
         }
-        if selected_input is None:
-            failures.append(f"input device {input_device!r} is unavailable")
-    except Exception as exc:
-        checks["input"] = {"ok": False, "error": str(exc)}
-        failures.append("audio input discovery failed")
+    else:
+        try:
+            import sounddevice as sd
+
+            devices = [dict(device) for device in sd.query_devices()]
+            selected_input = matching_device(devices, input_device, "input")
+            checks["input"] = {
+                "ok": selected_input is not None,
+                "requested": input_device,
+                "selected": selected_input.get("name") if selected_input else None,
+            }
+            if selected_input is None:
+                failures.append(f"input device {input_device!r} is unavailable")
+        except Exception as exc:
+            checks["input"] = {"ok": False, "error": str(exc)}
+            failures.append("audio input discovery failed")
 
     player = shutil.which("pw-play")
     sinks: list[str] = []
