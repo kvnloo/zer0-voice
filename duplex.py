@@ -39,6 +39,7 @@ from floor import (
     SubmissionDecision,
     TurnOwner,
     endpoint_hint,
+    pm_intent_quality,
 )
 from health import RuntimeHealth
 from indicator import VoiceState, make_indicator
@@ -155,6 +156,9 @@ def schedule_pm_decision(
         run_id=run_id,
         lifecycle=lifecycle,
     )
+    quality = pm_intent_quality(decision.text)
+    if not quality.accepted:
+        return wiring, f"filtered:{quality.reason}"
     return wiring, wiring.schedule(decision)
 
 
@@ -960,6 +964,9 @@ class LiveContextMirror:
         self.model = model
         self.developer_instructions = developer_instructions
         self.fixed_thread = fixed_thread
+        self.authoritative_thread: str | None = None
+        self.last_completed: str | None = None
+        self.live_thread: str | None = None
 
     async def refresh(self, authoritative_thread: str) -> str:
         if self.fixed_thread:
@@ -975,7 +982,13 @@ class LiveContextMirror:
             if turn.get("status") == "completed" and turn.get("id"):
                 last_completed = str(turn["id"])
                 break
-        return await self.server.fork_thread(
+        if (
+            self.live_thread
+            and self.authoritative_thread == authoritative_thread
+            and self.last_completed == last_completed
+        ):
+            return self.live_thread
+        live_thread = await self.server.fork_thread(
             authoritative_thread,
             cwd=self.cwd,
             model=self.model,
@@ -983,6 +996,10 @@ class LiveContextMirror:
             ephemeral=True,
             last_turn_id=last_completed,
         )
+        self.authoritative_thread = authoritative_thread
+        self.last_completed = last_completed
+        self.live_thread = live_thread
+        return live_thread
 
 
 async def existing_harness_thread(

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 
@@ -386,6 +386,24 @@ class DuplexTests(unittest.TestCase):
         self.assertEqual(delivered[0].thread, "thread-live")
         self.assertEqual(delivered[0].text, "Create the native PM issue.")
 
+    def test_social_voice_turn_is_not_scheduled_as_pm_work(self):
+        wiring = MagicMock()
+        wiring.commit_sequence = 0
+        decision = SubmissionDecision("submit", "Okay.", "deadline")
+        with patch("duplex.voice_pm_wiring", return_value=wiring):
+            selected, lane = schedule_pm_decision(
+                {},
+                endpoint="http://127.0.0.1:8787/v1/voice/committed",
+                lane="candidate",
+                thread="thread-live",
+                run_id="voice-run-live",
+                lifecycle=None,
+                decision=decision,
+            )
+        self.assertIs(selected, wiring)
+        self.assertEqual(lane, "filtered:non-action")
+        wiring.schedule.assert_not_called()
+
     def test_spoken_stop_is_exact_and_does_not_capture_task_language(self):
         for phrase in (
             "stop",
@@ -624,7 +642,7 @@ class AsyncDuplexTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(owner.pending, "")
         self.assertIsNone(owner.deadline)
 
-    async def test_live_context_reforks_authoritative_keyboard_history(self):
+    async def test_live_context_reuses_fork_until_keyboard_history_changes(self):
         class Server:
             def __init__(self):
                 self.calls = []
@@ -649,20 +667,10 @@ class AsyncDuplexTests(unittest.IsolatedAsyncioTestCase):
             developer_instructions="speak briefly",
         )
         self.assertEqual(await mirror.refresh("harness"), "live-1")
-        self.assertEqual(await mirror.refresh("harness"), "live-2")
+        self.assertEqual(await mirror.refresh("harness"), "live-1")
         self.assertEqual(
             server.calls,
             [
-                (
-                    "harness",
-                    {
-                        "cwd": Path("/workspace/pm"),
-                        "model": None,
-                        "developer_instructions": "speak briefly",
-                        "ephemeral": True,
-                        "last_turn_id": "done-1",
-                    },
-                ),
                 (
                     "harness",
                     {

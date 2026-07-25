@@ -234,7 +234,33 @@ SHORT_COMPLETE = {
     "yes",
     "no",
 }
-NON_LEXICAL = {"ah", "cough", "er", "hmm", "uh", "um"}
+NON_LEXICAL = {
+    "ah",
+    "cough",
+    "coughing",
+    "er",
+    "hmm",
+    "mm",
+    "mmm",
+    "ugh",
+    "uh",
+    "um",
+    "zzz",
+}
+PM_NON_ACTIONS = {
+    "all right",
+    "hello",
+    "hey",
+    "hi",
+    "okay",
+    "ok",
+    "thank you",
+    "thanks",
+    "thanks for watching",
+    "that's it",
+    "that's it for now",
+    "that's it for this video",
+}
 INCOMPLETE_PHRASE_TAILS = {
     "going to",
     "have to",
@@ -295,6 +321,17 @@ def transcript_quality(
         and words[0] in {normalized(term) for term in hotwords}
     ):
         return TranscriptQuality(False, "repeated-hotword")
+    return TranscriptQuality(True)
+
+
+def pm_intent_quality(text: str) -> TranscriptQuality:
+    """Keep social/noise turns conversational without manufacturing PM work."""
+    quality = transcript_quality(text)
+    if not quality.accepted:
+        return quality
+    value = normalized(text)
+    if value in PM_NON_ACTIONS:
+        return TranscriptQuality(False, "non-action")
     return TranscriptQuality(True)
 
 

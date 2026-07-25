@@ -8,6 +8,7 @@ from floor import (
     Interruption,
     TurnOwner,
     endpoint_hint,
+    pm_intent_quality,
     transcript_quality,
 )
 
@@ -109,6 +110,32 @@ class FloorPolicyTests(unittest.TestCase):
         ):
             with self.subTest(text=text):
                 self.assertFalse(transcript_quality(text).accepted)
+
+    def test_cough_variants_never_commit(self):
+        for text in ("Coughing.", "Ugh. Coughing.", "Mmm.", "ZZZ"):
+            with self.subTest(text=text):
+                quality = transcript_quality(text)
+                self.assertFalse(quality.accepted)
+                self.assertEqual(quality.reason, "non-lexical")
+
+    def test_social_turns_do_not_manufacture_pm_work(self):
+        for text in (
+            "Hello.",
+            "Okay.",
+            "Thank you.",
+            "Thanks for watching.",
+            "That's it for this video.",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(transcript_quality(text).accepted)
+                self.assertFalse(pm_intent_quality(text).accepted)
+
+    def test_meaningful_voice_intent_remains_pm_eligible(self):
+        self.assertTrue(
+            pm_intent_quality(
+                "MCP, Google Meet, infinite canvas, that's actually it."
+            ).accepted
+        )
 
     def test_short_real_turns_still_commit(self):
         for text in ("Hello?", "keep going", "JAX", "See right there."):
