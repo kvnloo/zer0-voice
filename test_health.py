@@ -1,5 +1,6 @@
 import json
 import tempfile
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -14,6 +15,26 @@ class HealthTests(unittest.TestCase):
         self.assertEqual(
             assess({"updated_ns": 0}),
             (False, "heartbeat-invalid"),
+        )
+
+    def test_heartbeat_must_belong_to_supervised_process_and_run(self):
+        snapshot = {
+            "pid": 42,
+            "run_id": "run-42",
+            "updated_ns": time.time_ns(),
+            "phase": "listening",
+        }
+        self.assertEqual(
+            assess(snapshot, expected_pid=43),
+            (False, "heartbeat-pid-mismatch"),
+        )
+        self.assertEqual(
+            assess(snapshot, expected_pid=42, expected_run_id="other"),
+            (False, "heartbeat-run-mismatch"),
+        )
+        self.assertEqual(
+            assess(snapshot, expected_pid=42, expected_run_id="run-42"),
+            (True, "healthy"),
         )
 
     def test_runtime_heartbeat_contains_no_conversation_content(self):

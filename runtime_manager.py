@@ -9,6 +9,7 @@ import json
 import os
 import signal
 import sys
+import tempfile
 import time
 import urllib.request
 from dataclasses import dataclass
@@ -85,6 +86,38 @@ class RuntimeManager:
         self.generation = 0
         self.stopping = asyncio.Event()
         self.proxy = ControlProxy(args.control_socket, lambda: self.active)
+
+    def publish_active(self, generation: Generation | None) -> None:
+        """Atomically publish the sole telemetry source selected by the owner."""
+        path = self.args.active_generation
+        if generation is None:
+            path.unlink(missing_ok=True)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema": 1,
+            "digest": generation.digest,
+            "generation": generation.candidate.health.parent.name,
+            "pid": getattr(generation.process, "pid", None),
+            "health": str(generation.candidate.health),
+            "debug": str(self.args.debug_events),
+            "updated_ns": time.time_ns(),
+        }
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+                json.dump(payload, output, separators=(",", ":"), sort_keys=True)
+                output.write("\n")
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     @staticmethod
     def url_ready(url: str, timeout: float = 0.5) -> bool:
@@ -195,6 +228,7 @@ class RuntimeManager:
         if status.get("capture_active") is not True:
             raise HandoffError("replacement failed to acquire capture")
         self.active = generation
+        self.publish_active(generation)
 
     async def hot_swap(self, digest: str, bundle: Path) -> bool:
         assert self.active is not None
@@ -210,6 +244,7 @@ class RuntimeManager:
             raise
         old = self.active
         self.active = candidate
+        self.publish_active(candidate)
         self.rollback = old
         healthy = await self.probation(candidate)
         if healthy:
@@ -225,6 +260,7 @@ class RuntimeManager:
             if restored.get("capture_active") is not True:
                 raise HandoffError("probation rollback failed")
             self.active = old
+            self.publish_active(old)
             self.rejected_digest = digest
         finally:
             await self.terminate(candidate)
@@ -344,6 +380,8 @@ class RuntimeManager:
             await self.proxy.close()
             await self.terminate(self.active)
             await self.terminate(self.rollback)
+            self.active = None
+            self.publish_active(None)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -396,6 +434,12 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--poll-interval", type=float, default=0.1)
     result.add_argument("--metrics", type=Path, default=root / "bench/voice-history.jsonl")
     result.add_argument("--debug-events", type=Path, default=state / "voice-debug.jsonl")
+    result.add_argument(
+        "--active-generation",
+        type=Path,
+        default=state / "active-generation.json",
+        help="atomic RuntimeManager-owned telemetry source manifest",
+    )
     return result
 
 

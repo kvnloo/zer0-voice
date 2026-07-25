@@ -35,6 +35,7 @@ fi
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 state="${XDG_STATE_HOME:-$HOME/.local/state}/zer0-voice"
 log="$state/$thread.log"
+health="$state/$thread.health.json"
 mkdir -p "$(dirname -- "$log")"
 relay_pid=
 supervisor_pid=
@@ -91,10 +92,18 @@ fi
 
 supervise_voice() (
     voice_child=
+    voice_status=1
+    heartbeat_deadline=8
+    startup_grace=12
     stop_voice() {
         if [ -n "$voice_child" ]; then
             kill "$voice_child" 2>/dev/null || true
-            wait "$voice_child" 2>/dev/null || true
+            if wait "$voice_child"; then
+                voice_status=0
+            else
+                voice_status=$?
+            fi
+            voice_child=
         fi
     }
     trap 'stop_voice; exit 0' INT TERM HUP
@@ -102,6 +111,7 @@ supervise_voice() (
     backoff=1
     while :; do
         started=$(date +%s)
+        rm -f "$health"
         "$root/voice/duplex" \
             --session "$thread" \
             --app-server shared \
@@ -114,19 +124,45 @@ supervise_voice() (
             --keyboard-indicator "${ZERO_WOOTING_INDICATOR:-none}" \
             --metrics "$root/bench/voice-history.jsonl" \
             --debug-events "$state/voice-debug.jsonl" \
+            --health "$health" \
             >>"$log" 2>&1 &
         voice_child=$!
-        if wait "$voice_child"; then
-            status=0
-        else
-            status=$?
+        beat_seen=0
+        voice_status=1
+        while kill -0 "$voice_child" 2>/dev/null; do
+            now=$(date +%s)
+            if python "$root/voice/health.py" "$health" \
+                --heartbeat-timeout "$heartbeat_deadline" \
+                --pid "$voice_child" >/dev/null 2>&1; then
+                beat_seen=1
+            fi
+            if { [ "$beat_seen" -eq 0 ] &&
+                    [ $((now - started)) -gt "$startup_grace" ]; } ||
+                { [ "$beat_seen" -eq 1 ] &&
+                    ! python "$root/voice/health.py" "$health" \
+                        --heartbeat-timeout "$heartbeat_deadline" \
+                        --pid "$voice_child" >/dev/null 2>&1; }; then
+                echo "voice heartbeat stale; restarting worker" >&2
+                stop_voice
+                break
+            fi
+            sleep 1
+            # keep the main thread responsive to process death
+            kill -0 "$voice_child" 2>/dev/null || break
+        done
+        if [ -n "$voice_child" ]; then
+            if wait "$voice_child"; then
+                voice_status=0
+            else
+                voice_status=$?
+            fi
+            voice_child=
         fi
-        voice_child=
         uptime=$(($(date +%s) - started))
         if [ "$uptime" -ge 60 ]; then
             backoff=1
         fi
-        echo "voice exited status=$status; restarting in ${backoff}s" >&2
+        echo "voice exited status=$voice_status; restarting in ${backoff}s" >&2
         sleep "$backoff"
         if [ "$backoff" -lt 8 ]; then
             backoff=$((backoff * 2))

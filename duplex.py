@@ -491,6 +491,7 @@ def natural_speech_text(text: str) -> str:
     text = re.sub(r"(?m)^\s{0,3}(?:[-*+]|\d+[.)])\s+", "", text)
     text = re.sub(r"(?:--?>|={1,2}>|→|⇒|⟶)", ", then ", text)
     text = re.sub(r"#(\d+)", r"issue \1", text)
+    text = re.sub(r"\bpane\s+%(\d+)", r"pane \1", text, flags=re.IGNORECASE)
     text = re.sub(r"%(\d+)", r"pane \1", text)
     text = re.sub(r"(?<=[A-Za-z])\.(?=[A-Za-z])", " ", text)
     text = re.sub(r"\s*[/\\|]\s*", " or ", text)

@@ -261,7 +261,7 @@ class DuplexTests(unittest.TestCase):
         )
         self.assertEqual(
             spoken,
-            "harnesses read Codex or OMP, then pane pane 19; see the link",
+            "harnesses read Codex or OMP, then pane 19; see the link",
         )
         for symbol in ("/", "→", "->", "`", "[", "]"):
             self.assertNotIn(symbol, spoken)

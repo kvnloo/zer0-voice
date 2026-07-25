@@ -41,10 +41,16 @@ def assess(
     heartbeat_timeout_seconds: float = DEFAULT_HEARTBEAT_TIMEOUT_SECONDS,
     capture_timeout_seconds: float = DEFAULT_CAPTURE_TIMEOUT_SECONDS,
     phase_deadlines_seconds: dict[str, float] | None = None,
+    expected_pid: int | None = None,
+    expected_run_id: str | None = None,
 ) -> tuple[bool, str]:
     """Return functional health without inspecting transcript or response text."""
     if not snapshot:
         return False, "heartbeat-missing"
+    if expected_pid is not None and snapshot.get("pid") != expected_pid:
+        return False, "heartbeat-pid-mismatch"
+    if expected_run_id is not None and snapshot.get("run_id") != expected_run_id:
+        return False, "heartbeat-run-mismatch"
     now_ns = now_ns or time.time_ns()
     updated_ns = int(snapshot.get("updated_ns", 0))
     if updated_ns <= 0:
@@ -206,11 +212,22 @@ def main() -> int:
         type=float,
         default=DEFAULT_HEARTBEAT_TIMEOUT_SECONDS,
     )
+    parser.add_argument(
+        "--pid",
+        type=int,
+        help="require the heartbeat to belong to this worker process",
+    )
+    parser.add_argument(
+        "--run-id",
+        help="require the heartbeat to belong to this exact worker run",
+    )
     args = parser.parse_args()
     snapshot = read_snapshot(args.path)
     ok, reason = assess(
         snapshot,
         heartbeat_timeout_seconds=args.heartbeat_timeout,
+        expected_pid=args.pid,
+        expected_run_id=args.run_id,
     )
     print(
         json.dumps(

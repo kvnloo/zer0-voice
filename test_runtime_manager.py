@@ -49,6 +49,7 @@ def args(root: Path):
         poll_interval=0.001,
         metrics=root / "metrics.jsonl",
         debug_events=root / "debug.jsonl",
+        active_generation=root / "active-generation.json",
     )
 
 
@@ -75,6 +76,26 @@ class RuntimeManagerTests(unittest.IsolatedAsyncioTestCase):
             command[command.index("--control-socket") + 1],
             str(root / "generation/control.sock"),
         )
+
+    def test_active_manifest_names_exact_health_and_global_debug_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manager = RuntimeManager(args(root))
+            generation = Generation(
+                "1" * 64,
+                root / "bundle",
+                Candidate(
+                    root / "state/generations/00000001/control.sock",
+                    root / "state/generations/00000001/health.json",
+                ),
+                Process(),
+            )
+            manager.publish_active(generation)
+            manifest = json.loads(manager.args.active_generation.read_text())
+        self.assertEqual(manifest["digest"], "1" * 64)
+        self.assertEqual(manifest["generation"], "00000001")
+        self.assertEqual(manifest["health"], str(generation.candidate.health))
+        self.assertEqual(manifest["debug"], str(manager.args.debug_events))
 
     def test_dependency_health_requires_explicit_healthy_payload(self):
         response = MagicMock()
@@ -223,10 +244,14 @@ class RuntimeManagerTests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(),
             ) as terminate:
                 self.assertTrue(await manager.hot_swap(new.digest, new.bundle))
-        self.assertIs(manager.active, new)
-        self.assertIsNone(manager.rollback)
-        switch.assert_awaited_once()
-        terminate.assert_awaited_once_with(old)
+            self.assertIs(manager.active, new)
+            self.assertIsNone(manager.rollback)
+            self.assertEqual(
+                json.loads(manager.args.active_generation.read_text())["digest"],
+                new.digest,
+            )
+            switch.assert_awaited_once()
+            terminate.assert_awaited_once_with(old)
 
     async def test_failed_probation_restores_old_before_killing_candidate(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -271,17 +296,21 @@ class RuntimeManagerTests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(),
             ) as terminate:
                 self.assertFalse(await manager.hot_swap(new.digest, new.bundle))
-        self.assertIs(manager.active, old)
-        self.assertEqual(manager.rejected_digest, new.digest)
-        self.assertIsNone(manager.rollback)
-        self.assertEqual(
-            [call.args for call in controls.await_args_list],
-            [
-                (new.candidate.control, {"mic": "muted"}),
-                (old.candidate.control, {"mic": "continuous"}),
-            ],
-        )
-        terminate.assert_awaited_once_with(new)
+            self.assertIs(manager.active, old)
+            self.assertEqual(
+                json.loads(manager.args.active_generation.read_text())["digest"],
+                old.digest,
+            )
+            self.assertEqual(manager.rejected_digest, new.digest)
+            self.assertIsNone(manager.rollback)
+            self.assertEqual(
+                [call.args for call in controls.await_args_list],
+                [
+                    (new.candidate.control, {"mic": "muted"}),
+                    (old.candidate.control, {"mic": "continuous"}),
+                ],
+            )
+            terminate.assert_awaited_once_with(new)
 
     async def test_rejected_pointer_is_quarantined_without_losing_active(self):
         with tempfile.TemporaryDirectory() as directory:
