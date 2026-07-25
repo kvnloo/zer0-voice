@@ -103,13 +103,14 @@ overlap, yields for corrections/questions, and can briefly hold the floor for an
 important or safety-critical thought. Its adaptive endpoint tolerates reflective
 pauses instead of treating every silence as the end of a turn.
 
-The production duplex runtime defaults to `--barge-in final`. Speech capture
-continues while a reply is pending, but a completed follow-up is buffered
-instead of canceling a reply that has not begun playback. The replaceable live
-lane uses `gpt-5.6-luna` at low effort by default; the authoritative harness
-still receives every committed turn independently. `sustained` and `immediate`
-remain explicit opt-ins for environments where aggressive interruption is more
-important than preserving a slow unspoken reply.
+The production duplex runtime defaults to `--barge-in sustained`. Speech
+capture continues during playback and confirmed speech interrupts the audible
+reply without waiting for the user's completed utterance; coughs and single
+audio transients do not. A follow-up that arrives before playback begins stays
+buffered so a slow unspoken reply is not discarded. The replaceable live lane
+uses `gpt-5.6-luna` at low effort by default; the authoritative harness still
+receives every committed turn independently. `final` and `immediate` remain
+explicit overrides for turn-taking experiments.
 
 Input and proactive speech density are independent runtime modes:
 

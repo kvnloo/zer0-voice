@@ -54,8 +54,8 @@ class ReleaseTests(unittest.TestCase):
         wrapper = (root / "voice/candidate-service").read_text()
         self.assertIn("ZERO_VOICE_LIVE_MODEL:-gpt-5.6-luna", wrapper)
         self.assertIn("ZERO_VOICE_LIVE_EFFORT:-low", wrapper)
-        self.assertIn("ZERO_VOICE_BARGE_IN:-final", wrapper)
-        self.assertNotIn("ZERO_VOICE_BARGE_IN:-sustained", wrapper)
+        self.assertIn("ZERO_VOICE_BARGE_IN:-sustained", wrapper)
+        self.assertNotIn("ZERO_VOICE_BARGE_IN:-final", wrapper)
         manager = (root / "voice/runtime_manager.py").read_text()
         self.assertIn('"--startup-phrase"', manager)
         self.assertIn('""', manager)
@@ -71,7 +71,7 @@ class ReleaseTests(unittest.TestCase):
     def test_candidate_buffers_followup_speech_and_has_no_startup_chatter(self):
         root = Path(__file__).resolve().parents[1]
         wrapper = (root / "voice/candidate-service").read_text()
-        self.assertIn('ZERO_VOICE_BARGE_IN:-final', wrapper)
+        self.assertIn('ZERO_VOICE_BARGE_IN:-sustained', wrapper)
         self.assertIn('--startup-phrase ""', wrapper)
         self.assertIn('ZERO_VOICE_MIC_MODE:-continuous', wrapper)
         self.assertIn('ZERO_VOICE_CONTROL_SOCKET', wrapper)
@@ -87,6 +87,7 @@ class ReleaseTests(unittest.TestCase):
 
     def test_bundle_pins_adapter_recovery_code_and_its_regression_test(self):
         self.assertIn("voice/candidate-service", RUNTIME_FILES)
+        self.assertIn("voice/test_duplex.py", RUNTIME_FILES)
         self.assertIn("voice/release.py", RUNTIME_FILES)
         self.assertIn("voice/test_health.py", RUNTIME_FILES)
         self.assertIn("voice/turn_contract.py", RUNTIME_FILES)

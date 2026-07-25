@@ -60,7 +60,7 @@ while :; do
         --live-effort "${ZERO_VOICE_LIVE_EFFORT:-low}" \
         --live-timeout "${ZERO_VOICE_LIVE_TIMEOUT:-35}" \
         --live-acknowledgments \
-        --barge-in "${ZERO_VOICE_BARGE_IN:-final}" \
+        --barge-in "${ZERO_VOICE_BARGE_IN:-sustained}" \
         --startup-phrase "" \
         --control-socket "$control_socket" \
         --keyboard-indicator none \

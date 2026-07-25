@@ -24,6 +24,7 @@ RUNTIME_FILES = (
     "voice/candidate-service",
     "voice/duplex",
     "voice/duplex.py",
+    "voice/test_duplex.py",
     "voice/conversation.py",
     "voice/control_plane.py",
     "voice/floor.py",

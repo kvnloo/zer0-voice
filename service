@@ -116,7 +116,7 @@ python "$bundle_root/voice/runtime_manager.py" "$thread" \
     --live-model "${ZERO_VOICE_LIVE_MODEL:-gpt-5.6-luna}" \
     --live-effort "${ZERO_VOICE_LIVE_EFFORT:-low}" \
     --live-timeout "${ZERO_VOICE_LIVE_TIMEOUT:-35}" \
-    --barge-in "${ZERO_VOICE_BARGE_IN:-final}" \
+    --barge-in "${ZERO_VOICE_BARGE_IN:-sustained}" \
     --keyboard-indicator "${ZERO_WOOTING_INDICATOR:-none}" \
     --metrics "$root/bench/voice-history.jsonl" \
     --debug-events "$state/voice-debug.jsonl" &

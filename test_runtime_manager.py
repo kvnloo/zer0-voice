@@ -57,7 +57,7 @@ class RuntimeManagerTests(unittest.IsolatedAsyncioTestCase):
         parsed = parser().parse_args(["thread-1"])
         self.assertEqual(parsed.live_model, "gpt-5.6-luna")
         self.assertEqual(parsed.live_effort, "low")
-        self.assertEqual(parsed.barge_in, "final")
+        self.assertEqual(parsed.barge_in, "sustained")
         self.assertEqual(parsed.mic_mode, "continuous")
 
     def test_generation_command_has_private_control_and_same_thread(self):

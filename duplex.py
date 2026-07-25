@@ -56,9 +56,11 @@ You are Zer0's realtime conversational voice lane. Respond immediately and
 substantively to the user's latest spoken thought in natural conversational
 English. Use one or two short sentences, usually under 35 words. Never emit
 markdown, status boilerplate, canned acknowledgments, or phrases such as
-"got it" and "I'm with you". Do not call tools. A separate authoritative
-reasoning agent is doing the deep work, so answer what you can now and clearly
-name only genuinely necessary uncertainty.
+"got it" and "I'm with you". Do not speak paths, URLs, arrows, slash-separated
+labels, or other screen notation. Paraphrase technical state as ordinary spoken
+English. Do not call tools. A separate authoritative reasoning agent is doing
+the deep work, so answer what you can now and clearly name only genuinely
+necessary uncertainty.
 """
 
 
@@ -464,6 +466,42 @@ class SentenceChunker:
         return tail
 
 
+def natural_speech_text(text: str) -> str:
+    """Render precise screen text as natural speech without UI punctuation."""
+    text = re.sub(
+        r"```.*?```",
+        " I put the code on screen. ",
+        text,
+        flags=re.DOTALL,
+    )
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"https?://\S+", "the link", text)
+
+    def path_name(match: re.Match[str]) -> str:
+        name = Path(match.group(0).rstrip("/")).name
+        stem = Path(name).stem.replace("_", " ").replace("-", " ")
+        return stem or "that location"
+
+    text = re.sub(
+        r"(?<!\w)(?:~?/|\./|\.\./)[A-Za-z0-9_./-]+",
+        path_name,
+        text,
+    )
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    text = re.sub(r"(?m)^\s{0,3}(?:[-*+]|\d+[.)])\s+", "", text)
+    text = re.sub(r"(?:--?>|={1,2}>|→|⇒|⟶)", ", then ", text)
+    text = re.sub(r"#(\d+)", r"issue \1", text)
+    text = re.sub(r"%(\d+)", r"pane \1", text)
+    text = re.sub(r"(?<=[A-Za-z])\.(?=[A-Za-z])", " ", text)
+    text = re.sub(r"\s*[/\\|]\s*", " or ", text)
+    text = text.replace("&", " and ")
+    text = re.sub(r"[*_~^<>]+", "", text)
+    text = re.sub(r"\s*[:=]\s*", ", ", text)
+    text = re.sub(r"\s+([,.!?])", r"\1", text)
+    text = re.sub(r"(?:\s*,\s*){2,}", ", ", text)
+    return re.sub(r"\s+", " ", text).strip(" ,")
+
+
 class Microphone:
     def __init__(
         self,
@@ -799,13 +837,17 @@ class DuplexTurn:
             if self.prefix_speech:
                 if self.on_speaking:
                     self.on_speaking()
-                    announced = True
-                await self.speaker.say(self.prefix_speech)
+                announced = True
+                spoken = natural_speech_text(self.prefix_speech)
+                if spoken:
+                    await self.speaker.say(spoken)
             while (chunk := await chunks.get()) is not None:
                 if not announced and self.on_speaking:
                     self.on_speaking()
                     announced = True
-                await self.speaker.say(chunk)
+                spoken = natural_speech_text(chunk)
+                if spoken:
+                    await self.speaker.say(spoken)
 
         generate_task = asyncio.create_task(generate(), name="voice-turn-generate")
         speak_task = asyncio.create_task(speak(), name="voice-turn-speak")
@@ -2338,7 +2380,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--barge-in",
-        default="final",
+        default="sustained",
         choices=("off", "final", "sustained", "immediate"),
         help=(
             "final buffers the next utterance while replies finish; sustained "

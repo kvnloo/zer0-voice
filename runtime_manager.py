@@ -389,7 +389,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--live-model", default="gpt-5.6-luna")
     result.add_argument("--live-effort", default="low")
     result.add_argument("--live-timeout", type=float, default=35)
-    result.add_argument("--barge-in", default="final")
+    result.add_argument("--barge-in", default="sustained")
     result.add_argument("--keyboard-indicator", default="none")
     result.add_argument("--readiness-timeout", type=float, default=180)
     result.add_argument("--probation", type=float, default=10)

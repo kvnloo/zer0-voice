@@ -27,6 +27,7 @@ from duplex import (
     append_metric,
     collect_owned_transcript,
     mark_capture_active,
+    natural_speech_text,
     needs_startup_calibration,
     next_final,
     next_controlled_final,
@@ -252,6 +253,24 @@ class DuplexTests(unittest.TestCase):
         self.assertEqual(chunker.feed("First thought. Sec"), ["First thought."])
         self.assertEqual(chunker.feed("ond thought? Tail"), ["Second thought?"])
         self.assertEqual(chunker.flush(), "Tail")
+
+    def test_natural_speech_removes_screen_notation(self):
+        spoken = natural_speech_text(
+            "- [`harnesses.read`](/workspace/zer0/products/pm) "
+            "Codex/OMP → pane %19; see https://example.com/status"
+        )
+        self.assertEqual(
+            spoken,
+            "harnesses read Codex or OMP, then pane pane 19; see the link",
+        )
+        for symbol in ("/", "→", "->", "`", "[", "]"):
+            self.assertNotIn(symbol, spoken)
+
+    def test_natural_speech_replaces_code_blocks_with_spoken_summary(self):
+        self.assertEqual(
+            natural_speech_text("Here is the change:\n```sh\npm/status → ok\n```"),
+            "Here is the change, I put the code on screen.",
+        )
 
     def test_pm_boundary_parser_recognizes_explicit_create_phrases(self):
         self.assertEqual(
