@@ -1,8 +1,10 @@
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 from unittest.mock import patch
 
-from preflight import matching_device, parse_pulse_sinks, preflight
+from preflight import matching_device, parse_pulse_sinks, preflight, probe_input
 
 
 DEVICES = [
@@ -53,6 +55,29 @@ class PreflightTests(unittest.TestCase):
 
     def test_missing_device_fails_without_guessing(self):
         self.assertIsNone(matching_device(DEVICES, "nonexistent", "input"))
+
+    def test_input_probe_opens_starts_stops_and_closes_stream(self):
+        stream = MagicMock()
+        sounddevice = SimpleNamespace(InputStream=MagicMock(return_value=stream))
+        probe_input(sounddevice, "Blue")
+        sounddevice.InputStream.assert_called_once_with(
+            device="Blue",
+            samplerate=16_000,
+            channels=1,
+            blocksize=800,
+            dtype="float32",
+        )
+        stream.start.assert_called_once_with()
+        stream.stop.assert_called_once_with()
+        stream.close.assert_called_once_with()
+
+    def test_input_probe_closes_stream_when_start_fails(self):
+        stream = MagicMock()
+        stream.start.side_effect = OSError("device unavailable")
+        sounddevice = SimpleNamespace(InputStream=MagicMock(return_value=stream))
+        with self.assertRaisesRegex(OSError, "device unavailable"):
+            probe_input(sounddevice, "default")
+        stream.close.assert_called_once_with()
 
     def test_pipewire_sink_parser_uses_stable_node_name(self):
         output = (

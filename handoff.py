@@ -91,6 +91,7 @@ async def handoff(
     control_request: ControlRequest = request,
     readiness_timeout: float = 30.0,
     request_timeout: float = 1.0,
+    probation_seconds: float = 0.5,
 ) -> dict[str, object]:
     """Move capture at an idle turn boundary; restore active on any failure."""
     try:
@@ -106,7 +107,7 @@ async def handoff(
     old_healthy, old_reason = assess(old_health)
     if not old_healthy or old_health.get("phase") != "listening":
         raise HandoffError(f"active generation is not idle: {old_reason}")
-    await wait_ready(
+    candidate_ready = await wait_ready(
         candidate,
         timeout=readiness_timeout,
         request_timeout=request_timeout,
@@ -127,7 +128,36 @@ async def handoff(
         )
         if promoted.get("capture_active") is not True:
             raise HandoffError("candidate did not acquire capture")
+        await asyncio.sleep(max(0.0, probation_seconds))
+        stable = await asyncio.wait_for(
+            control_request(candidate.control, {}),
+            timeout=request_timeout,
+        )
+        stable_health = read_snapshot(candidate.health)
+        stable_healthy, stable_reason = assess(stable_health)
+        expected_pid = int(candidate_ready["health"].get("pid", 0))
+        if (
+            not stable_healthy
+            or int(stable_health.get("pid", 0)) != expected_pid
+            or stable.get("mic") != old_mode
+            or stable.get("capture_active") is not True
+        ):
+            raise HandoffError(
+                "candidate failed post-handoff probation: "
+                + (
+                    stable_reason
+                    if not stable_healthy
+                    else "generation-or-capture-changed"
+                )
+            )
     except BaseException as acquisition_error:
+        try:
+            await asyncio.wait_for(
+                control_request(candidate.control, {"mic": "muted"}),
+                timeout=request_timeout,
+            )
+        except (OSError, RuntimeError, TimeoutError):
+            pass
         try:
             restored = await asyncio.wait_for(
                 control_request(active.control, {"mic": old_mode}),
@@ -150,6 +180,7 @@ async def handoff(
         "old_pid": int(old_health.get("pid", 0)),
         "candidate_pid": int(read_snapshot(candidate.health).get("pid", 0)),
         "old_retained_for_rollback": True,
+        "post_handoff_probation_seconds": max(0.0, probation_seconds),
         "capture_gap_bound": "two-bounded-local-control-round-trips",
     }
 

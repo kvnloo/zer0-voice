@@ -17,10 +17,19 @@ def health(pid: int, phase: str = "listening"):
 
 
 class Controls:
-    def __init__(self, active: Path, candidate: Path, *, candidate_fails=False):
+    def __init__(
+        self,
+        active: Path,
+        candidate: Path,
+        *,
+        candidate_fails=False,
+        candidate_dies_after_activation=False,
+    ):
         self.active = active
         self.candidate = candidate
         self.candidate_fails = candidate_fails
+        self.candidate_dies_after_activation = candidate_dies_after_activation
+        self.candidate_activated = False
         self.states = {
             active: {
                 "ok": True,
@@ -39,6 +48,13 @@ class Controls:
 
     async def __call__(self, path, command):
         self.calls.append((path, command))
+        if (
+            path == self.candidate
+            and self.candidate_dies_after_activation
+            and self.candidate_activated
+            and not command
+        ):
+            raise OSError("candidate died during probation")
         state = self.states[path]
         if command.get("mic") == "muted":
             state = {**state, "mic": "muted", "capture_active": False}
@@ -46,6 +62,8 @@ class Controls:
             if path == self.candidate and self.candidate_fails:
                 raise OSError("candidate control died")
             state = {**state, "mic": command["mic"], "capture_active": True}
+            if path == self.candidate:
+                self.candidate_activated = True
         self.states[path] = state
         return state
 
@@ -91,6 +109,7 @@ class HandoffTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result["status"], "candidate-active")
         self.assertTrue(result["old_retained_for_rollback"])
+        self.assertGreater(result["post_handoff_probation_seconds"], 0)
 
     async def test_failed_candidate_restores_old_capture(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -110,6 +129,29 @@ class HandoffTests(unittest.IsolatedAsyncioTestCase):
                     new,
                     control_request=controls,
                     readiness_timeout=0.01,
+                )
+        self.assertTrue(controls.states[old.control]["capture_active"])
+        self.assertEqual(controls.states[old.control]["mic"], "continuous")
+
+    async def test_candidate_death_during_probation_restores_old_capture(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old = Candidate(root / "old.sock", root / "old.json")
+            new = Candidate(root / "new.sock", root / "new.json")
+            old.health.write_text(__import__("json").dumps(health(1)))
+            new.health.write_text(__import__("json").dumps(health(2)))
+            controls = Controls(
+                old.control,
+                new.control,
+                candidate_dies_after_activation=True,
+            )
+            with self.assertRaisesRegex(OSError, "probation"):
+                await handoff(
+                    old,
+                    new,
+                    control_request=controls,
+                    readiness_timeout=0.01,
+                    probation_seconds=0,
                 )
         self.assertTrue(controls.states[old.control]["capture_active"])
         self.assertEqual(controls.states[old.control]["mic"], "continuous")

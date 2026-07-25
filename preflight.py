@@ -40,6 +40,22 @@ def parse_pulse_sinks(output: str) -> list[str]:
     ]
 
 
+def probe_input(sounddevice, device: str | None) -> None:
+    """Prove the selected route opens; enumeration alone accepts dead defaults."""
+    stream = sounddevice.InputStream(
+        device=device,
+        samplerate=16_000,
+        channels=1,
+        blocksize=800,
+        dtype="float32",
+    )
+    try:
+        stream.start()
+        stream.stop()
+    finally:
+        stream.close()
+
+
 def preflight(
     *,
     whisper_python: str,
@@ -120,6 +136,8 @@ def preflight(
 
             devices = [dict(device) for device in sd.query_devices()]
             selected_input = matching_device(devices, input_device, "input")
+            if selected_input is not None:
+                probe_input(sd, input_device)
             checks["input"] = {
                 "ok": selected_input is not None,
                 "requested": input_device,
