@@ -1,7 +1,9 @@
 import json
 import os
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -197,6 +199,88 @@ class ReleaseTests(unittest.TestCase):
             applied = rollback(state, apply=True)
             self.assertTrue(applied["applied"])
             self.assertEqual(resolve_production(state).name, first)
+
+    def test_contended_promotions_have_one_winner_per_expected_generation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, state, first = self.staged(directory, "one")
+            promote(state, first, canary(first), apply=True)
+            _, _, second = self.staged(directory, "two")
+            _, _, third = self.staged(directory, "three")
+            barrier = threading.Barrier(2)
+
+            def contender(digest):
+                barrier.wait()
+                try:
+                    return promote(
+                        state,
+                        digest,
+                        canary(digest),
+                        apply=True,
+                        expected_generation=1,
+                    )
+                except ReleaseError as error:
+                    return error
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                outcomes = list(pool.map(contender, (second, third)))
+            winners = [item for item in outcomes if isinstance(item, dict)]
+            losers = [item for item in outcomes if isinstance(item, ReleaseError)]
+            self.assertEqual((len(winners), len(losers)), (1, 1))
+            pointer = read_pointer(state)
+            self.assertEqual(pointer["generation"], 2)
+            self.assertEqual(pointer["previous_bundle_sha256"], first)
+            self.assertRegex(str(losers[0]), "generation changed")
+
+    def test_contended_promote_and_rollback_cannot_lose_pointer_update(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, state, first = self.staged(directory, "one")
+            promote(state, first, canary(first), apply=True)
+            _, _, second = self.staged(directory, "two")
+            promote(state, second, canary(second), apply=True)
+            _, _, third = self.staged(directory, "three")
+            barrier = threading.Barrier(2)
+
+            def promote_third():
+                barrier.wait()
+                return promote(
+                    state,
+                    third,
+                    canary(third),
+                    apply=True,
+                    expected_generation=2,
+                )
+
+            def roll_back():
+                barrier.wait()
+                return rollback(
+                    state,
+                    apply=True,
+                    expected_generation=2,
+                )
+
+            def outcome(operation):
+                try:
+                    return operation()
+                except ReleaseError as error:
+                    return error
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [
+                    pool.submit(outcome, promote_third),
+                    pool.submit(outcome, roll_back),
+                ]
+                outcomes = [future.result() for future in futures]
+            self.assertEqual(
+                sum(isinstance(item, dict) for item in outcomes),
+                1,
+            )
+            self.assertEqual(
+                sum(isinstance(item, ReleaseError) for item in outcomes),
+                1,
+            )
+            pointer = read_pointer(state)
+            self.assertEqual(pointer["generation"], 3)
+            self.assertEqual(pointer["previous_bundle_sha256"], second)
 
     def test_dirty_worktree_cannot_change_pinned_restart_source(self):
         with tempfile.TemporaryDirectory() as directory:

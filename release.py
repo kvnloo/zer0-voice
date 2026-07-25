@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -14,6 +15,7 @@ import tempfile
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any, Iterable
+from contextlib import contextmanager
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = 1
@@ -354,6 +356,20 @@ def read_pointer(state: Path) -> dict[str, Any] | None:
     return pointer
 
 
+@contextmanager
+def pointer_lock(state: Path):
+    """Serialize pointer reads and mutations across all release processes."""
+    state.mkdir(parents=True, exist_ok=True)
+    path = state / ".production.lock"
+    with path.open("a", encoding="utf-8") as lock:
+        os.chmod(path, 0o600)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
 def release_record_path(state: Path, digest: str) -> Path:
     return state / "verified" / f"{digest}.json"
 
@@ -403,18 +419,28 @@ def write_release_record(
     return record
 
 
-def promote(
+def _promote_locked(
     state: Path,
     digest: str,
     verdict: dict[str, Any],
     *,
     apply: bool = False,
+    expected_generation: int | None = None,
 ) -> dict[str, Any]:
     verify_bundle(bundle_path(state, digest))
     decision, turns = validate_verdict(verdict, digest)
     current = read_pointer(state)
     if current:
         resolve_production(state)
+    observed_generation = int(current.get("generation", 0)) if current else 0
+    if (
+        expected_generation is not None
+        and expected_generation != observed_generation
+    ):
+        raise ReleaseError(
+            f"production generation changed: expected {expected_generation}, "
+            f"observed {observed_generation}"
+        )
     before = current.get("bundle_sha256") if current else None
     if decision != "promote":
         return {
@@ -467,6 +493,24 @@ def promote(
     }
 
 
+def promote(
+    state: Path,
+    digest: str,
+    verdict: dict[str, Any],
+    *,
+    apply: bool = False,
+    expected_generation: int | None = None,
+) -> dict[str, Any]:
+    with pointer_lock(state):
+        return _promote_locked(
+            state,
+            digest,
+            verdict,
+            apply=apply,
+            expected_generation=expected_generation,
+        )
+
+
 def resolve_production(state: Path) -> Path:
     pointer = read_pointer(state)
     if not pointer:
@@ -480,10 +524,24 @@ def resolve_production(state: Path) -> Path:
     return path
 
 
-def rollback(state: Path, *, apply: bool = False) -> dict[str, Any]:
+def _rollback_locked(
+    state: Path,
+    *,
+    apply: bool = False,
+    expected_generation: int | None = None,
+) -> dict[str, Any]:
     current = read_pointer(state)
     if not current or not current.get("previous_bundle_sha256"):
         raise ReleaseError("no prior verified voice bundle is available")
+    observed_generation = int(current["generation"])
+    if (
+        expected_generation is not None
+        and expected_generation != observed_generation
+    ):
+        raise ReleaseError(
+            f"production generation changed: expected {expected_generation}, "
+            f"observed {observed_generation}"
+        )
     resolve_production(state)
     before = current["bundle_sha256"]
     previous = current["previous_bundle_sha256"]
@@ -507,6 +565,20 @@ def rollback(state: Path, *, apply: bool = False) -> dict[str, Any]:
     }
 
 
+def rollback(
+    state: Path,
+    *,
+    apply: bool = False,
+    expected_generation: int | None = None,
+) -> dict[str, Any]:
+    with pointer_lock(state):
+        return _rollback_locked(
+            state,
+            apply=apply,
+            expected_generation=expected_generation,
+        )
+
+
 def default_state() -> Path:
     base = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
     return base / "zer0-voice/releases"
@@ -528,11 +600,13 @@ def main() -> int:
     promote_parser.add_argument("bundle")
     promote_parser.add_argument("--verdict", type=Path, required=True)
     promote_parser.add_argument("--apply", action="store_true")
+    promote_parser.add_argument("--expected-generation", type=int)
     subparsers.add_parser("status")
     resolve_parser = subparsers.add_parser("resolve")
     resolve_parser.add_argument("--path", action="store_true")
     rollback_parser = subparsers.add_parser("rollback")
     rollback_parser.add_argument("--apply", action="store_true")
+    rollback_parser.add_argument("--expected-generation", type=int)
     args = parser.parse_args()
     try:
         if args.command == "stage":
@@ -549,9 +623,14 @@ def main() -> int:
                 args.bundle,
                 verdict,
                 apply=args.apply,
+                expected_generation=args.expected_generation,
             )
         elif args.command == "rollback":
-            result = rollback(args.state, apply=args.apply)
+            result = rollback(
+                args.state,
+                apply=args.apply,
+                expected_generation=args.expected_generation,
+            )
         elif args.command == "resolve":
             path = resolve_production(args.state)
             if args.path:
