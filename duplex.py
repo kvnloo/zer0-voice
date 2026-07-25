@@ -90,6 +90,31 @@ def mark_capture_active(health: RuntimeHealth | None) -> None:
         health.transition("listening", lane="mic")
 
 
+_PM_COMMAND = re.compile(
+    r"^\s*(?:please\s+)?(?:create|add|make)\s+"
+    r"(?:(?:a|an)\s+)?(?P<kind>task|defect|bug|feature|project|portfolio|product|company)\s+"
+    r"(?:called|named|for|about|to)?\s*(?P<title>.+?)\s*[.!?]*$",
+    re.IGNORECASE,
+)
+
+
+def parse_pm_boundary(text: str) -> dict[str, object] | None:
+    """Parse explicit spoken PM creation commands."""
+    match = _PM_COMMAND.match(text.strip())
+    if not match:
+        return None
+    boundary_type = match.group("kind").lower()
+    title = match.group("title").strip()
+    if not title:
+        return None
+    if boundary_type == "bug":
+        boundary_type = "defect"
+    return {
+        "type": boundary_type,
+        "title": title,
+    }
+
+
 def pm_lifecycle_sink(path: Path | None):
     """Write publisher state only; the adapter never supplies turn content."""
 
@@ -145,6 +170,7 @@ def schedule_pm_decision(
     run_id: str,
     lifecycle,
     decision: SubmissionDecision,
+    boundary: dict[str, object] | None = None,
 ) -> tuple[VoicePMWiring, str]:
     """Schedule the live loop's committed owner decision without relay I/O."""
 
@@ -159,7 +185,7 @@ def schedule_pm_decision(
     quality = pm_intent_quality(decision.text)
     if not quality.accepted:
         return wiring, f"filtered:{quality.reason}"
-    return wiring, wiring.schedule(decision)
+    return wiring, wiring.schedule_with_boundary(decision, boundary=boundary)
 
 
 async def monitor_control(
@@ -1881,6 +1907,7 @@ async def run(args) -> None:
                 if health:
                     health.transition("syncing", lane="live")
                 binding = await harness_router.resolve(text)
+                boundary = parse_pm_boundary(text)
                 publisher, published_lane = schedule_pm_decision(
                     pm_wirings,
                     endpoint=args.committed_voice_url,
@@ -1889,6 +1916,7 @@ async def run(args) -> None:
                     run_id=run_id,
                     lifecycle=pm_lifecycle,
                     decision=owned.decision,
+                    boundary=boundary,
                 )
                 if debug_path:
                     await asyncio.to_thread(

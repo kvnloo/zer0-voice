@@ -18,6 +18,7 @@ from duplex import (
     apply_live_reload,
     LiveContextMirror,
     Microphone,
+    parse_pm_boundary,
     SentenceChunker,
     Speaker,
     UtteranceDetector,
@@ -251,6 +252,20 @@ class DuplexTests(unittest.TestCase):
         self.assertEqual(chunker.feed("First thought. Sec"), ["First thought."])
         self.assertEqual(chunker.feed("ond thought? Tail"), ["Second thought?"])
         self.assertEqual(chunker.flush(), "Tail")
+
+    def test_pm_boundary_parser_recognizes_explicit_create_phrases(self):
+        self.assertEqual(
+            parse_pm_boundary("Create a task add continuous voice fallback"),
+            {"type": "task", "title": "add continuous voice fallback"},
+        )
+        self.assertEqual(
+            parse_pm_boundary("please add defect fix transcript lag"),
+            {"type": "defect", "title": "fix transcript lag"},
+        )
+        self.assertIsNone(parse_pm_boundary("please call out the bottleneck"))
+
+    def test_pm_boundary_parser_ignores_empty_title(self):
+        self.assertIsNone(parse_pm_boundary("Create task "))
 
     def test_adaptive_threshold_tracks_noise_with_safe_bounds(self):
         self.assertEqual(adaptive_threshold(np.array([])), 0.018)
