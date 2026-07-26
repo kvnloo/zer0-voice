@@ -93,12 +93,23 @@ class RuntimeManager:
         if generation is None:
             path.unlink(missing_ok=True)
             return
+        snapshot = read_snapshot(generation.candidate.health)
+        process_pid = getattr(generation.process, "pid", None)
+        run_id = snapshot.get("run_id")
+        if isinstance(process_pid, int):
+            if snapshot.get("pid") != process_pid:
+                raise HandoffError("active generation heartbeat PID mismatch")
+            if not isinstance(run_id, str) or not run_id:
+                raise HandoffError("active generation heartbeat run id missing")
+            if snapshot.get("bundle_sha256") != generation.digest:
+                raise HandoffError("active generation heartbeat bundle mismatch")
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "schema": 1,
             "digest": generation.digest,
             "generation": generation.candidate.health.parent.name,
-            "pid": getattr(generation.process, "pid", None),
+            "pid": process_pid,
+            "run_id": run_id,
             "health": str(generation.candidate.health),
             "debug": str(self.args.debug_events),
             "updated_ns": time.time_ns(),
@@ -148,7 +159,8 @@ class RuntimeManager:
         raise RuntimeError("Kokoro recovery timed out")
 
     def command(self, bundle: Path, state: Path, mic_mode: str) -> list[str]:
-        return [
+        workspace_routing = getattr(self.args, "workspace_routing", False)
+        command = [
             str(bundle / "voice/duplex"),
             "--session",
             self.args.thread,
@@ -158,7 +170,12 @@ class RuntimeManager:
             str(self.args.root),
             "--app-server",
             "shared",
-            "--no-workspace-routing",
+        ]
+        if workspace_routing:
+            command.append("--workspace-routing")
+        else:
+            command.append("--no-workspace-routing")
+        command += [
             "--kokoro-url",
             self.args.kokoro_url,
             "--committed-voice-url",
@@ -195,6 +212,7 @@ class RuntimeManager:
             "--health",
             str(state / "health.json"),
         ]
+        return command
 
     async def launch(
         self,
@@ -239,29 +257,99 @@ class RuntimeManager:
                 candidate.candidate,
                 readiness_timeout=self.args.readiness_timeout,
             )
-        except BaseException:
+        except BaseException as handoff_error:
+            old = self.active
             await self.terminate(candidate)
+            if candidate.process.returncode is None:
+                self.args.active_generation.unlink(missing_ok=True)
+                self.active = None
+                raise HandoffError(
+                    "candidate termination was not confirmed"
+                ) from handoff_error
+            try:
+                restored = await request(
+                    old.candidate.control,
+                    {"mic": self.args.mic_mode},
+                )
+                if (
+                    restored.get("mic") != self.args.mic_mode
+                    or restored.get("capture_active") is not True
+                ):
+                    raise HandoffError(
+                        "previous owner restore was not acknowledged"
+                    )
+                confirmed = await request(old.candidate.control, {})
+                if (
+                    confirmed.get("mic") != self.args.mic_mode
+                    or confirmed.get("capture_active") is not True
+                ):
+                    raise HandoffError(
+                        "previous owner restore was not confirmed"
+                    )
+            except (HandoffError, OSError, RuntimeError, TimeoutError) as error:
+                self.args.active_generation.unlink(missing_ok=True)
+                self.active = None
+                raise HandoffError(
+                    "candidate stopped but previous owner restore failed"
+                ) from error
             raise
         old = self.active
-        self.active = candidate
-        self.publish_active(candidate)
         self.rollback = old
+        self.active = candidate
+        try:
+            self.publish_active(candidate)
+        except BaseException:
+            self.args.active_generation.unlink(missing_ok=True)
+            try:
+                await request(candidate.candidate.control, {"mic": "muted"})
+                restored = await request(
+                    old.candidate.control,
+                    {"mic": self.args.mic_mode},
+                )
+                if restored.get("capture_active") is not True:
+                    raise HandoffError("manifest rollback failed")
+                self.active = old
+                self.publish_active(old)
+            finally:
+                await self.terminate(candidate)
+                self.rollback = None
+            raise
         healthy = await self.probation(candidate)
         if healthy:
             await self.terminate(old)
             self.rollback = None
             return True
-        try:
-            await request(candidate.candidate.control, {"mic": "muted"})
-            restored = await request(
-                old.candidate.control,
+        await request(candidate.candidate.control, {"mic": "muted"})
+        restored = await request(
+            old.candidate.control,
+            {"mic": self.args.mic_mode},
+        )
+        if restored.get("capture_active") is not True:
+            # The previous worker could not reacquire the microphone. Restore
+            # the candidate rather than turning a failed rollback into a
+            # total voice outage; the manager's health loop will recover it.
+            fallback = await request(
+                candidate.candidate.control,
                 {"mic": self.args.mic_mode},
             )
-            if restored.get("capture_active") is not True:
-                raise HandoffError("probation rollback failed")
-            self.active = old
-            self.publish_active(old)
+            if fallback.get("capture_active") is not True:
+                self.args.active_generation.unlink(missing_ok=True)
+                self.active = None
+                self.rollback = None
+                raise HandoffError("probation rollback and fallback failed")
+            self.active = candidate
+            self.publish_active(candidate)
             self.rejected_digest = digest
+            await self.terminate(old)
+            self.rollback = None
+            return False
+        self.active = old
+        self.rejected_digest = digest
+        try:
+            self.publish_active(old)
+        except BaseException:
+            self.args.active_generation.unlink(missing_ok=True)
+            raise
         finally:
             await self.terminate(candidate)
             self.rollback = None
@@ -287,6 +375,7 @@ class RuntimeManager:
         except TimeoutError:
             generation.process.kill()
             await generation.process.wait()
+        generation.candidate.control.unlink(missing_ok=True)
 
     async def recover(self) -> None:
         assert self.active is not None
@@ -434,6 +523,18 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--poll-interval", type=float, default=0.1)
     result.add_argument("--metrics", type=Path, default=root / "bench/voice-history.jsonl")
     result.add_argument("--debug-events", type=Path, default=state / "voice-debug.jsonl")
+    default_workspace_routing = os.environ.get("ZERO_VOICE_WORKSPACE_ROUTING", "false").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    result.add_argument(
+        "--workspace-routing",
+        action=argparse.BooleanOptionalAction,
+        default=default_workspace_routing,
+        help="route by workspace/tmux focus when active; default from ZERO_VOICE_WORKSPACE_ROUTING",
+    )
     result.add_argument(
         "--active-generation",
         type=Path,

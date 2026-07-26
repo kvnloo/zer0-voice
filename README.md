@@ -216,7 +216,7 @@ python voice/release.py verdict BUNDLE_SHA \
 python voice/release.py promote BUNDLE_SHA \
   --verdict /tmp/voice-verdict.json
 python voice/release.py promote BUNDLE_SHA \
-  --verdict /tmp/voice-verdict.json --apply
+  --verdict /tmp/voice-verdict.json --apply --expected-generation GENERATION
 ```
 
 Only an exact `promote` verdict with at least ten completed turns can replace
@@ -235,7 +235,7 @@ previous verified bundle:
 
 ```sh
 python voice/release.py rollback
-python voice/release.py rollback --apply
+python voice/release.py rollback --apply --expected-generation GENERATION
 ```
 
 The release CLI never launches a candidate. Shadow/canary code is contractually

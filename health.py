@@ -85,6 +85,7 @@ class RuntimeHealth:
 
     path: Path
     run_id: str
+    bundle_sha256: str = ""
     phase: str = "starting"
     phase_since_ns: int = 0
     revision: int = 0
@@ -162,6 +163,7 @@ class RuntimeHealth:
             "schema": 1,
             "pid": os.getpid(),
             "run_id": self.run_id,
+            "bundle_sha256": self.bundle_sha256,
             "phase": self.phase,
             "lane": self.lane,
             "reason": self.reason,

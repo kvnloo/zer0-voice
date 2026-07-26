@@ -69,7 +69,7 @@ RUNTIME_FILES = (
     "adapters/voice_pm/test_wiring.py",
     "adapters/voice_pm/wiring.py",
 )
-RUNTIME_CONTRACT = {
+LEGACY_RUNTIME_CONTRACT = {
     "candidate_shadow": {
         "microphone": "forbidden",
         "authoritative_thread": "forbidden",
@@ -78,6 +78,41 @@ RUNTIME_CONTRACT = {
     "production": {
         "selection": "atomic-pointer",
         "source": "verified-bundle-only",
+    },
+}
+MANAGED_RUNTIME_REQUIRED_FILES = (
+    "voice/runtime_manager.py",
+    "voice/control_plane.py",
+    "voice/handoff.py",
+    "voice/health.py",
+    "voice/release.py",
+    "voice/duplex",
+    "voice/duplex.py",
+    "voice/conversation.py",
+    "voice/floor.py",
+    "voice/indicator.py",
+    "voice/lexicon.json",
+    "voice/lexicon.py",
+    "voice/modes.py",
+    "voice/preflight.py",
+    "voice/routes.json",
+    "voice/turn_contract.py",
+    "voice/voice_adapter.py",
+    "voice/workspace_router.py",
+    "contracts/events.py",
+    "adapters/codex/app_server.py",
+    "adapters/llm/providers.py",
+    "adapters/voice_pm/publisher.py",
+    "adapters/voice_pm/wiring.py",
+)
+RUNTIME_CONTRACT = {
+    **LEGACY_RUNTIME_CONTRACT,
+    "production": {
+        **LEGACY_RUNTIME_CONTRACT["production"],
+        "profile": "managed-runtime-v1",
+        "entrypoint": "voice/runtime_manager.py",
+        "required_files": list(MANAGED_RUNTIME_REQUIRED_FILES),
+        "required_executables": ["voice/duplex"],
     },
 }
 VERDICT_KEYS = {
@@ -126,6 +161,8 @@ def file_record(path: Path, relative: str) -> dict[str, object]:
 def manifest_for(
     source: Path,
     allowlist: Iterable[str] = RUNTIME_FILES,
+    *,
+    runtime_contract: dict[str, Any] = RUNTIME_CONTRACT,
 ) -> dict[str, Any]:
     source_root = source.resolve()
     files = []
@@ -145,7 +182,7 @@ def manifest_for(
     body = {
         "schema": SCHEMA,
         "files": files,
-        "runtime_contract": RUNTIME_CONTRACT,
+        "runtime_contract": runtime_contract,
     }
     return {**body, "bundle_sha256": sha256(canonical(body))}
 
@@ -173,7 +210,10 @@ def verify_bundle(path: Path) -> dict[str, Any]:
         raise ReleaseError("bundle manifest digest mismatch")
     if path.name != digest:
         raise ReleaseError("bundle directory does not match manifest digest")
-    if manifest["runtime_contract"] != RUNTIME_CONTRACT:
+    if manifest["runtime_contract"] not in (
+        LEGACY_RUNTIME_CONTRACT,
+        RUNTIME_CONTRACT,
+    ):
         raise ReleaseError("bundle runtime contract mismatch")
 
     expected = {record["path"]: record for record in manifest["files"]}
@@ -197,14 +237,45 @@ def verify_bundle(path: Path) -> dict[str, Any]:
     return manifest
 
 
+def verify_managed_production(path: Path) -> dict[str, Any]:
+    """Require the immutable bundle closure consumed by voice/service."""
+    manifest = verify_bundle(path)
+    if manifest["runtime_contract"] != RUNTIME_CONTRACT:
+        raise ReleaseError(
+            "bundle lacks managed-production profile managed-runtime-v1"
+        )
+    records = {record["path"]: record for record in manifest["files"]}
+    missing = [
+        relative
+        for relative in MANAGED_RUNTIME_REQUIRED_FILES
+        if relative not in records
+    ]
+    if missing:
+        raise ReleaseError(
+            "managed-production bundle is missing required file: "
+            + missing[0]
+        )
+    for relative in RUNTIME_CONTRACT["production"]["required_executables"]:
+        if records[relative].get("executable") is not True:
+            raise ReleaseError(
+                "managed-production executable bit is missing: " + relative
+            )
+    return manifest
+
+
 def stage(
     source: Path,
     state: Path,
     *,
     apply: bool = False,
     allowlist: Iterable[str] = RUNTIME_FILES,
+    runtime_contract: dict[str, Any] = RUNTIME_CONTRACT,
 ) -> dict[str, Any]:
-    manifest = manifest_for(source, allowlist)
+    manifest = manifest_for(
+        source,
+        allowlist,
+        runtime_contract=runtime_contract,
+    )
     destination = bundle_path(state, manifest["bundle_sha256"])
     result = {
         "action": "stage",
@@ -427,11 +498,11 @@ def _promote_locked(
     apply: bool = False,
     expected_generation: int | None = None,
 ) -> dict[str, Any]:
-    verify_bundle(bundle_path(state, digest))
+    verify_managed_production(bundle_path(state, digest))
     decision, turns = validate_verdict(verdict, digest)
     current = read_pointer(state)
     if current:
-        resolve_production(state)
+        resolve_verified_production(state)
     observed_generation = int(current.get("generation", 0)) if current else 0
     if (
         expected_generation is not None
@@ -511,7 +582,12 @@ def promote(
         )
 
 
-def resolve_production(state: Path) -> Path:
+def resolve_verified_production(state: Path) -> Path:
+    """Resolve the current pointer using immutable integrity only.
+
+    Promotion uses this during the one-way migration from a verified legacy
+    emergency bundle to the managed production profile.
+    """
     pointer = read_pointer(state)
     if not pointer:
         raise ReleaseError("no production voice bundle is pinned")
@@ -522,6 +598,39 @@ def resolve_production(state: Path) -> Path:
     if record["release_sha256"] != pointer["release_sha256"]:
         raise ReleaseError("production pointer verification mismatch")
     return path
+
+
+def resolve_production(state: Path) -> Path:
+    path = resolve_verified_production(state)
+    verify_managed_production(path)
+    return path
+
+
+def release_status(state: Path) -> dict[str, Any]:
+    """Report a verified pointer even while migrating a legacy production."""
+    pointer = read_pointer(state)
+    if not pointer:
+        return {
+            "production": None,
+            "pointer": None,
+            "managed_compatible": False,
+            "managed_compatibility_error": "no production voice bundle is pinned",
+        }
+    path = resolve_verified_production(state)
+    try:
+        verify_managed_production(path)
+    except ReleaseError as error:
+        compatible = False
+        reason: str | None = str(error)
+    else:
+        compatible = True
+        reason = None
+    return {
+        "production": str(path),
+        "pointer": pointer,
+        "managed_compatible": compatible,
+        "managed_compatibility_error": reason,
+    }
 
 
 def _rollback_locked(
@@ -542,10 +651,10 @@ def _rollback_locked(
             f"production generation changed: expected {expected_generation}, "
             f"observed {observed_generation}"
         )
-    resolve_production(state)
+    resolve_verified_production(state)
     before = current["bundle_sha256"]
     previous = current["previous_bundle_sha256"]
-    verify_bundle(bundle_path(state, previous))
+    verify_managed_production(bundle_path(state, previous))
     record = verify_release_record(state, previous)
     pointer = {
         "schema": SCHEMA,
@@ -617,6 +726,10 @@ def main() -> int:
             canary = json.loads(args.canary.read_text(encoding="utf-8"))
             result = verdict_from_canary(canary, args.bundle)
         elif args.command == "promote":
+            if args.apply and args.expected_generation is None:
+                raise ReleaseError(
+                    "--apply requires --expected-generation from release status"
+                )
             verdict = json.loads(args.verdict.read_text(encoding="utf-8"))
             result = promote(
                 args.state,
@@ -626,6 +739,10 @@ def main() -> int:
                 expected_generation=args.expected_generation,
             )
         elif args.command == "rollback":
+            if args.apply and args.expected_generation is None:
+                raise ReleaseError(
+                    "--apply requires --expected-generation from release status"
+                )
             result = rollback(
                 args.state,
                 apply=args.apply,
@@ -638,13 +755,7 @@ def main() -> int:
                 return 0
             result = {"production": str(path), "pointer": read_pointer(args.state)}
         else:
-            pointer = read_pointer(args.state)
-            result = {
-                "production": (
-                    str(resolve_production(args.state)) if pointer else None
-                ),
-                "pointer": pointer,
-            }
+            result = release_status(args.state)
     except (OSError, ReleaseError, json.JSONDecodeError) as error:
         print(json.dumps({"ok": False, "error": str(error)}), file=sys.stderr)
         return 1

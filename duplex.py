@@ -1532,7 +1532,15 @@ async def run(args) -> None:
     from faster_whisper import WhisperModel
 
     run_id = f"{time.time_ns():x}-{os.getpid():x}"
-    health = RuntimeHealth(args.health, run_id) if args.health else None
+    health = (
+        RuntimeHealth(
+            args.health,
+            run_id,
+            bundle_sha256=args.release_bundle or "",
+        )
+        if args.health
+        else None
+    )
     health_monitor = (
         asyncio.create_task(monitor_health(health), name="voice-health")
         if health

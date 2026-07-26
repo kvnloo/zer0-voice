@@ -35,142 +35,19 @@ fi
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 state="${XDG_STATE_HOME:-$HOME/.local/state}/zer0-voice"
 log="$state/$thread.log"
-health="$state/$thread.health.json"
 mkdir -p "$(dirname -- "$log")"
-relay_pid=
 supervisor_pid=
 cleanup() {
     if [ -n "$supervisor_pid" ]; then
         kill "$supervisor_pid" 2>/dev/null || true
         wait "$supervisor_pid" 2>/dev/null || true
     fi
-    if [ -n "$relay_pid" ]; then
-        kill "$relay_pid" 2>/dev/null || true
-        wait "$relay_pid" 2>/dev/null || true
-    fi
 }
 trap cleanup EXIT INT TERM HUP
 
-kokoro_url="${ZERO_KOKORO_URL:-http://127.0.0.1:8880}"
-kokoro_launcher="${ZERO_KOKORO_LAUNCHER:-/workspace/kokoro-tts/kokoro.sh}"
-if ! curl -fsS --max-time 1 "$kokoro_url/health" >/dev/null 2>&1; then
-    if [ ! -x "$kokoro_launcher" ]; then
-        echo "Kokoro is offline and launcher is unavailable: $kokoro_launcher" >&2
-        exit 1
-    fi
-    "$kokoro_launcher" start
-    attempts=0
-    until curl -fsS --max-time 1 "$kokoro_url/health" >/dev/null 2>&1; do
-        attempts=$((attempts + 1))
-        if [ "$attempts" -ge 300 ]; then
-            echo "Kokoro did not become ready at $kokoro_url; run: $kokoro_launcher log" >&2
-            exit 1
-        fi
-        sleep 0.1
-    done
-fi
-
-if ! curl -fsS --max-time 1 http://127.0.0.1:8787/healthz >/dev/null 2>&1; then
-    if [ ! -x "$root/core/target/release/zer0d" ]; then
-        cargo build --release --manifest-path "$root/core/Cargo.toml" --bin zer0d
-    fi
-    python "$root/integration/relay.py" \
-        --events "$state/events.jsonl" \
-        --zer0d "$root/core/target/release/zer0d" \
-        >"$state/relay.log" 2>&1 &
-    relay_pid=$!
-    attempts=0
-    until curl -fsS --max-time 1 http://127.0.0.1:8787/healthz >/dev/null 2>&1; do
-        attempts=$((attempts + 1))
-        if [ "$attempts" -ge 20 ]; then
-            echo "event relay did not become ready; see $state/relay.log" >&2
-            exit 1
-        fi
-        sleep 0.1
-    done
-fi
-
-supervise_voice() (
-    voice_child=
-    voice_status=1
-    heartbeat_deadline=8
-    startup_grace=12
-    stop_voice() {
-        if [ -n "$voice_child" ]; then
-            kill "$voice_child" 2>/dev/null || true
-            if wait "$voice_child"; then
-                voice_status=0
-            else
-                voice_status=$?
-            fi
-            voice_child=
-        fi
-    }
-    trap 'stop_voice; exit 0' INT TERM HUP
-    trap stop_voice EXIT
-    backoff=1
-    while :; do
-        started=$(date +%s)
-        rm -f "$health"
-        "$root/voice/duplex" \
-            --session "$thread" \
-            --app-server shared \
-            --no-workspace-routing \
-            --kokoro-url "$kokoro_url" \
-            --input "${ZERO_VOICE_INPUT:-Blue Snowball}" \
-            --output "${ZERO_VOICE_OUTPUT:-effect_input.aural_evolution}" \
-            --mic-mode "${ZERO_VOICE_MIC_MODE:-continuous}" \
-            --notification-mode "${ZERO_VOICE_NOTIFICATION_MODE:-conversational}" \
-            --keyboard-indicator "${ZERO_WOOTING_INDICATOR:-none}" \
-            --metrics "$root/bench/voice-history.jsonl" \
-            --debug-events "$state/voice-debug.jsonl" \
-            --health "$health" \
-            >>"$log" 2>&1 &
-        voice_child=$!
-        beat_seen=0
-        voice_status=1
-        while kill -0 "$voice_child" 2>/dev/null; do
-            now=$(date +%s)
-            if python "$root/voice/health.py" "$health" \
-                --heartbeat-timeout "$heartbeat_deadline" \
-                --pid "$voice_child" >/dev/null 2>&1; then
-                beat_seen=1
-            fi
-            if { [ "$beat_seen" -eq 0 ] &&
-                    [ $((now - started)) -gt "$startup_grace" ]; } ||
-                { [ "$beat_seen" -eq 1 ] &&
-                    ! python "$root/voice/health.py" "$health" \
-                        --heartbeat-timeout "$heartbeat_deadline" \
-                        --pid "$voice_child" >/dev/null 2>&1; }; then
-                echo "voice heartbeat stale; restarting worker" >&2
-                stop_voice
-                break
-            fi
-            sleep 1
-            # keep the main thread responsive to process death
-            kill -0 "$voice_child" 2>/dev/null || break
-        done
-        if [ -n "$voice_child" ]; then
-            if wait "$voice_child"; then
-                voice_status=0
-            else
-                voice_status=$?
-            fi
-            voice_child=
-        fi
-        uptime=$(($(date +%s) - started))
-        if [ "$uptime" -ge 60 ]; then
-            backoff=1
-        fi
-        echo "voice exited status=$voice_status; restarting in ${backoff}s" >&2
-        sleep "$backoff"
-        if [ "$backoff" -lt 8 ]; then
-            backoff=$((backoff * 2))
-        fi
-    done
-)
-
-supervise_voice &
+# Delegate lifecycle ownership to the immutable RuntimeManager service. This
+# wrapper owns the TUI only; it must never race a second worker supervisor.
+"$root/voice/service" "$thread" >>"$log" 2>&1 &
 supervisor_pid=$!
 
 startup_timeout="${ZERO_VOICE_STARTUP_TIMEOUT_SECONDS:-30}"

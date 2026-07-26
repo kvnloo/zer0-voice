@@ -9,13 +9,37 @@ set -euo pipefail
 # in a tmux service window while the interactive harness is reattached.
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+if [ "${1:-}" = "--check" ]; then
+    export ZERO_VOICE_CHECK_ONLY=1
+    shift
+fi
 thread="${1:-${ZERO_VOICE_THREAD:-${CODEX_THREAD_ID:-}}}"
 if [ -z "$thread" ]; then
-    echo "usage: voice/service THREAD_ID" >&2
+    echo "usage: voice/service [--check] THREAD_ID" >&2
     exit 2
 fi
+skip_kokoro="${ZERO_VOICE_SKIP_KOKORO_CHECK:-${ZERO_STACK_SKIP_KOKORO_CHECK:-0}}"
 
 state="${ZERO_VOICE_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/zer0-voice}"
+release_state="${ZERO_VOICE_RELEASE_STATE:-$state/releases}"
+
+resolve_bundle() {
+    python "$root/voice/release.py" \
+        --state "$release_state" resolve --path
+}
+
+# Compatibility inspection must remain safe while production owns its lock.
+# It performs only verified immutable reads: no state directory, lock, daemon,
+# dependency, microphone, or socket is created.
+if [ "${ZERO_VOICE_CHECK_ONLY:-0}" = 1 ]; then
+    if ! bundle_root=$(resolve_bundle); then
+        echo "Voice release failed managed-production compatibility" >&2
+        exit 78
+    fi
+    echo "Voice release compatibility check passed: ${bundle_root##*/}" >&2
+    exit 0
+fi
+
 mkdir -p "$state"
 
 # Prevent two microphones from submitting the same utterance. The flock parent
@@ -30,10 +54,12 @@ fi
 # Resolve and verify the immutable production release once. Every worker
 # generation in this supervisor uses that pinned bundle; dirty worktree edits
 # cannot enter through watchdog restarts. Promotion never signals this process.
-release_state="${ZERO_VOICE_RELEASE_STATE:-$state/releases}"
-bundle_root=$(python "$root/voice/release.py" \
-    --state "$release_state" resolve --path)
+if ! bundle_root=$(resolve_bundle); then
+    echo "Voice release failed managed-production compatibility" >&2
+    exit 78
+fi
 echo "Voice release pinned: ${bundle_root##*/}" >&2
+runtime_manager="$bundle_root/voice/runtime_manager.py"
 
 voice_pid=
 relay_pid=
@@ -54,7 +80,7 @@ codex app-server daemon start >/dev/null
 
 kokoro_url="${ZERO_KOKORO_URL:-http://127.0.0.1:8880}"
 kokoro_launcher="${ZERO_KOKORO_LAUNCHER:-/workspace/kokoro-tts/kokoro.sh}"
-if ! curl -fsS --max-time 1 "$kokoro_url/health" >/dev/null 2>&1; then
+if [[ "$skip_kokoro" == "0" ]] && ! curl -fsS --max-time 1 "$kokoro_url/health" >/dev/null 2>&1; then
     if [ ! -x "$kokoro_launcher" ]; then
         echo "Kokoro is offline and launcher is unavailable: $kokoro_launcher" >&2
         exit 1
@@ -102,7 +128,11 @@ echo "PM event relay ready" >&2
 
 # This stable owner keeps the public control socket and authoritative thread
 # while immutable duplex generations warm, switch, recover, and roll back.
-python "$bundle_root/voice/runtime_manager.py" "$thread" \
+workspace_routing=(--workspace-routing)
+if [[ "${ZERO_VOICE_WORKSPACE_ROUTING:-1}" == 0 ]]; then
+    workspace_routing=(--no-workspace-routing)
+fi
+python "$runtime_manager" "$thread" \
     --root "$root" \
     --state "$state" \
     --release-state "$release_state" \
@@ -117,6 +147,7 @@ python "$bundle_root/voice/runtime_manager.py" "$thread" \
     --live-effort "${ZERO_VOICE_LIVE_EFFORT:-low}" \
     --live-timeout "${ZERO_VOICE_LIVE_TIMEOUT:-35}" \
     --barge-in "${ZERO_VOICE_BARGE_IN:-sustained}" \
+    "${workspace_routing[@]}" \
     --keyboard-indicator "${ZERO_WOOTING_INDICATOR:-none}" \
     --metrics "$root/bench/voice-history.jsonl" \
     --debug-events "$state/voice-debug.jsonl" &

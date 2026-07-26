@@ -115,12 +115,37 @@ async def handoff(
     )
     old_mode = str(old.get("mic", "continuous"))
     try:
-        await asyncio.wait_for(
+        muted = await asyncio.wait_for(
             control_request(active.control, {"mic": "muted"}),
             timeout=request_timeout,
         )
-    except TimeoutError as error:
-        raise HandoffError("active mute request timed out") from error
+        confirmed = await asyncio.wait_for(
+            control_request(active.control, {}),
+            timeout=request_timeout,
+        )
+        for response in (muted, confirmed):
+            if (
+                response.get("mic") != "muted"
+                or response.get("capture_active") is not False
+            ):
+                raise HandoffError("active mute was not confirmed")
+    except BaseException as mute_error:
+        try:
+            restored = await asyncio.wait_for(
+                control_request(active.control, {"mic": old_mode}),
+                timeout=request_timeout,
+            )
+        except (OSError, RuntimeError, TimeoutError) as restore_error:
+            raise HandoffError(
+                "active mute failed and rollback was unavailable"
+            ) from restore_error
+        if restored.get("capture_active") is not True:
+            raise HandoffError("active mute failed and rollback failed")
+        if isinstance(mute_error, TimeoutError):
+            raise HandoffError("active mute request timed out") from mute_error
+        if isinstance(mute_error, HandoffError):
+            raise mute_error
+        raise HandoffError("active mute confirmation failed") from mute_error
     try:
         promoted = await asyncio.wait_for(
             control_request(candidate.control, {"mic": old_mode}),
@@ -152,12 +177,28 @@ async def handoff(
             )
     except BaseException as acquisition_error:
         try:
-            await asyncio.wait_for(
+            muted_candidate = await asyncio.wait_for(
                 control_request(candidate.control, {"mic": "muted"}),
                 timeout=request_timeout,
             )
-        except (OSError, RuntimeError, TimeoutError):
-            pass
+            confirmed_candidate = await asyncio.wait_for(
+                control_request(candidate.control, {}),
+                timeout=request_timeout,
+            )
+            for response in (muted_candidate, confirmed_candidate):
+                if (
+                    response.get("mic") != "muted"
+                    or response.get("capture_active") is not False
+                ):
+                    raise HandoffError("candidate mute was not confirmed")
+        except (HandoffError, OSError, RuntimeError, TimeoutError) as mute_error:
+            # Never restore the old capture owner while the candidate might
+            # still own the device. The caller must stop/prove the candidate
+            # dead, then explicitly restore the retained active generation.
+            raise HandoffError(
+                "candidate capture state unknown; active remains muted "
+                "for manual recovery"
+            ) from mute_error
         try:
             restored = await asyncio.wait_for(
                 control_request(active.control, {"mic": old_mode}),
