@@ -5,4 +5,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - run: python3 -m pip install --requirement requirements-ci.txt
       - run: python3 -m unittest discover -s . -p 'test_*.py'
+      - run: python3 ci/verify_clean_clone.py

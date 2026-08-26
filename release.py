@@ -17,7 +17,9 @@ from pathlib import PurePosixPath
 from typing import Any, Iterable
 from contextlib import contextmanager
 
-ROOT = Path(__file__).resolve().parents[1]
+from repository_layout import logical_path, repository_root
+
+ROOT = repository_root(Path(__file__))
 SCHEMA = 1
 MINIMUM_TURNS = 10
 PRODUCTION_PIPELINE = "codex-continuous-pcm-v5"
@@ -40,6 +42,7 @@ RUNTIME_FILES = (
     "voice/modes.py",
     "voice/preflight.py",
     "voice/release.py",
+    "voice/repository_layout.py",
     "voice/runtime_manager.py",
     "voice/test_runtime_manager.py",
     "voice/routes.json",
@@ -86,6 +89,7 @@ MANAGED_RUNTIME_REQUIRED_FILES = (
     "voice/handoff.py",
     "voice/health.py",
     "voice/release.py",
+    "voice/repository_layout.py",
     "voice/duplex",
     "voice/duplex.py",
     "voice/conversation.py",
@@ -170,7 +174,7 @@ def manifest_for(
         parts = PurePosixPath(relative)
         if parts.is_absolute() or ".." in parts.parts:
             raise ReleaseError(f"unsafe runtime allowlist path: {relative}")
-        candidate = source / relative
+        candidate = logical_path(source, relative)
         cursor = source
         for part in parts.parts[:-1]:
             cursor /= part
@@ -293,7 +297,7 @@ def stage(
     temporary = Path(tempfile.mkdtemp(prefix=".stage-", dir=destination.parent))
     try:
         for record in manifest["files"]:
-            source_file = source / record["path"]
+            source_file = logical_path(source, record["path"])
             target = temporary / record["path"]
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source_file, target)

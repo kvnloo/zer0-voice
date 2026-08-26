@@ -10,6 +10,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
+from repository_layout import logical_path, repository_root
+
 from release import (
     LEGACY_RUNTIME_CONTRACT,
     MANAGED_RUNTIME_REQUIRED_FILES,
@@ -73,27 +75,27 @@ def canary(digest: str, verdict: str = "promote", turns: int = 10):
 
 class ReleaseTests(unittest.TestCase):
     def test_service_wrappers_use_dedicated_instant_lane_defaults(self):
-        root = Path(__file__).resolve().parents[1]
-        wrapper = (root / "voice/candidate-service").read_text()
+        root = repository_root(Path(__file__))
+        wrapper = logical_path(root, "voice/candidate-service").read_text()
         self.assertIn("ZERO_VOICE_LIVE_MODEL:-gpt-5.6-luna", wrapper)
         self.assertIn("ZERO_VOICE_LIVE_EFFORT:-low", wrapper)
         self.assertIn("ZERO_VOICE_BARGE_IN:-sustained", wrapper)
         self.assertNotIn("ZERO_VOICE_BARGE_IN:-final", wrapper)
-        manager = (root / "voice/runtime_manager.py").read_text()
+        manager = logical_path(root, "voice/runtime_manager.py").read_text()
         self.assertIn('"--startup-phrase"', manager)
         self.assertIn('""', manager)
 
     def test_candidate_supervisor_restarts_duplex_instead_of_silent_fallback(self):
-        root = Path(__file__).resolve().parents[1]
-        wrapper = (root / "voice/candidate-service").read_text()
+        root = repository_root(Path(__file__))
+        wrapper = logical_path(root, "voice/candidate-service").read_text()
         self.assertIn('while :; do', wrapper)
         self.assertIn('"duplex canary exited status=$status', wrapper)
         self.assertIn('restarting in ${delay}s', wrapper)
         self.assertNotIn('exec "$bundle/voice/simple-daemon"', wrapper)
 
     def test_candidate_buffers_followup_speech_and_has_no_startup_chatter(self):
-        root = Path(__file__).resolve().parents[1]
-        wrapper = (root / "voice/candidate-service").read_text()
+        root = repository_root(Path(__file__))
+        wrapper = logical_path(root, "voice/candidate-service").read_text()
         self.assertIn('ZERO_VOICE_BARGE_IN:-sustained', wrapper)
         self.assertIn('--startup-phrase ""', wrapper)
         self.assertIn('ZERO_VOICE_MIC_MODE:-continuous', wrapper)
@@ -103,14 +105,14 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn('--release-bundle "$digest"', wrapper)
 
     def test_production_buffers_followup_speech_and_has_no_startup_chatter(self):
-        root = Path(__file__).resolve().parents[1]
-        manager = (root / "voice/runtime_manager.py").read_text()
+        root = repository_root(Path(__file__))
+        manager = logical_path(root, "voice/runtime_manager.py").read_text()
         self.assertIn('"--barge-in"', manager)
         self.assertIn('"--startup-phrase"', manager)
 
     def test_service_has_side_effect_free_release_compatibility_preflight(self):
-        root = Path(__file__).resolve().parents[1]
-        wrapper = (root / "voice/service").read_text()
+        root = repository_root(Path(__file__))
+        wrapper = logical_path(root, "voice/service").read_text()
         parse_check = wrapper.index('if [ "${1:-}" = "--check" ]')
         resolve = wrapper.index('resolve --path')
         preflight_exit = wrapper.index(
@@ -131,6 +133,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("voice/candidate-service", RUNTIME_FILES)
         self.assertIn("voice/test_duplex.py", RUNTIME_FILES)
         self.assertIn("voice/release.py", RUNTIME_FILES)
+        self.assertIn("voice/repository_layout.py", RUNTIME_FILES)
         self.assertIn("voice/test_health.py", RUNTIME_FILES)
         self.assertIn("voice/turn_contract.py", RUNTIME_FILES)
         self.assertIn("voice/test_turn_contract.py", RUNTIME_FILES)

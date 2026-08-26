@@ -8,7 +8,8 @@ set -euo pipefail
 # the supplied authoritative thread through the managed app-server and can live
 # in a tmux service window while the interactive harness is reattached.
 
-root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+release_py=$(python "$script_dir/repository_layout.py" voice/release.py)
 if [ "${1:-}" = "--check" ]; then
     export ZERO_VOICE_CHECK_ONLY=1
     shift
@@ -24,7 +25,7 @@ state="${ZERO_VOICE_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/zer0-voice}
 release_state="${ZERO_VOICE_RELEASE_STATE:-$state/releases}"
 
 resolve_bundle() {
-    python "$root/voice/release.py" \
+    python "$release_py" \
         --state "$release_state" resolve --path
 }
 
