@@ -309,6 +309,71 @@ class ReleaseTests(unittest.TestCase):
             self.assertFalse(sentinel.exists())
             self.assertFalse(app_server_sentinel.exists())
 
+    def test_service_normal_startup_uses_canonical_root_without_side_effects(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            _, release_state, digest = self.staged(directory, "normal-startup")
+            promote(release_state, digest, canary(digest), apply=True)
+            runtime_state = base / "runtime"
+            fake_bin = base / "bin"
+            fake_bin.mkdir()
+            calls = base / "calls"
+            real_python = sys.executable
+
+            (fake_bin / "codex").write_text(
+                f"#!/bin/sh\nprintf 'codex %s\\n' \"$*\" >> {calls}\n"
+            )
+            (fake_bin / "cargo").write_text(
+                f"#!/bin/sh\nprintf 'cargo %s\\n' \"$*\" >> {calls}\n"
+            )
+            (fake_bin / "curl").write_text(
+                "#!/bin/sh\n"
+                f"printf 'curl %s\\n' \"$*\" >> {calls}\n"
+                "case \"$*\" in\n"
+                "  *8880/health*) exit 0 ;;\n"
+                f"  *8787/healthz*) test -e {base / 'relay-probed'} && exit 0; "
+                f"touch {base / 'relay-probed'}; exit 1 ;;\n"
+                "esac\n"
+                "exit 1\n"
+            )
+            (fake_bin / "python").write_text(
+                "#!/bin/sh\n"
+                f"case \"$1\" in\n  */integration/relay.py|*/voice/runtime_manager.py) "
+                f"printf 'python %s\\n' \"$*\" >> {calls}; exit 0 ;;\nesac\n"
+                f"exec {real_python} \"$@\"\n"
+            )
+            for executable in fake_bin.iterdir():
+                executable.chmod(0o755)
+
+            completed = subprocess.run(
+                [str(Path(__file__).with_name("service")), "thread"],
+                check=False,
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                    "ZERO_VOICE_LOCKED": "1",
+                    "ZERO_VOICE_STATE_DIR": str(runtime_state),
+                    "ZERO_VOICE_RELEASE_STATE": str(release_state),
+                },
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            invocation_log = calls.read_text()
+            root = repository_root(Path(__file__))
+            self.assertIn(
+                f"cargo build --release --manifest-path {root}/core/Cargo.toml --bin zer0d",
+                invocation_log,
+            )
+            self.assertIn(
+                f"python {root}/integration/relay.py --events {runtime_state}/events.jsonl "
+                f"--zer0d {root}/core/target/release/zer0d",
+                invocation_log,
+            )
+            self.assertIn(f"--root {root}", invocation_log)
+            self.assertIn(f"--metrics {root}/bench/voice-history.jsonl", invocation_log)
+
     def test_incompatible_service_check_creates_no_state_or_lock(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)

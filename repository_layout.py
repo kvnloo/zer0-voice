@@ -42,5 +42,6 @@ def logical_path(root: Path, relative: str) -> Path:
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        raise SystemExit("usage: repository_layout.py LOGICAL_PATH")
-    print(logical_path(repository_root(Path(__file__)), sys.argv[1]))
+        raise SystemExit("usage: repository_layout.py {--root|LOGICAL_PATH}")
+    root = repository_root(Path(__file__))
+    print(root if sys.argv[1] == "--root" else logical_path(root, sys.argv[1]))

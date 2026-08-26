@@ -9,6 +9,7 @@ set -euo pipefail
 # in a tmux service window while the interactive harness is reattached.
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+root=$(python "$script_dir/repository_layout.py" --root)
 release_py=$(python "$script_dir/repository_layout.py" voice/release.py)
 if [ "${1:-}" = "--check" ]; then
     export ZERO_VOICE_CHECK_ONLY=1
