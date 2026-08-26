@@ -10,6 +10,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
+from repository_layout import logical_path, repository_root
+
 from release import (
     LEGACY_RUNTIME_CONTRACT,
     MANAGED_RUNTIME_REQUIRED_FILES,
@@ -73,27 +75,27 @@ def canary(digest: str, verdict: str = "promote", turns: int = 10):
 
 class ReleaseTests(unittest.TestCase):
     def test_service_wrappers_use_dedicated_instant_lane_defaults(self):
-        root = Path(__file__).resolve().parents[1]
-        wrapper = (root / "voice/candidate-service").read_text()
+        root = repository_root(Path(__file__))
+        wrapper = logical_path(root, "voice/candidate-service").read_text()
         self.assertIn("ZERO_VOICE_LIVE_MODEL:-gpt-5.6-luna", wrapper)
         self.assertIn("ZERO_VOICE_LIVE_EFFORT:-low", wrapper)
         self.assertIn("ZERO_VOICE_BARGE_IN:-sustained", wrapper)
         self.assertNotIn("ZERO_VOICE_BARGE_IN:-final", wrapper)
-        manager = (root / "voice/runtime_manager.py").read_text()
+        manager = logical_path(root, "voice/runtime_manager.py").read_text()
         self.assertIn('"--startup-phrase"', manager)
         self.assertIn('""', manager)
 
     def test_candidate_supervisor_restarts_duplex_instead_of_silent_fallback(self):
-        root = Path(__file__).resolve().parents[1]
-        wrapper = (root / "voice/candidate-service").read_text()
+        root = repository_root(Path(__file__))
+        wrapper = logical_path(root, "voice/candidate-service").read_text()
         self.assertIn('while :; do', wrapper)
         self.assertIn('"duplex canary exited status=$status', wrapper)
         self.assertIn('restarting in ${delay}s', wrapper)
         self.assertNotIn('exec "$bundle/voice/simple-daemon"', wrapper)
 
     def test_candidate_buffers_followup_speech_and_has_no_startup_chatter(self):
-        root = Path(__file__).resolve().parents[1]
-        wrapper = (root / "voice/candidate-service").read_text()
+        root = repository_root(Path(__file__))
+        wrapper = logical_path(root, "voice/candidate-service").read_text()
         self.assertIn('ZERO_VOICE_BARGE_IN:-sustained', wrapper)
         self.assertIn('--startup-phrase ""', wrapper)
         self.assertIn('ZERO_VOICE_MIC_MODE:-continuous', wrapper)
@@ -103,14 +105,14 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn('--release-bundle "$digest"', wrapper)
 
     def test_production_buffers_followup_speech_and_has_no_startup_chatter(self):
-        root = Path(__file__).resolve().parents[1]
-        manager = (root / "voice/runtime_manager.py").read_text()
+        root = repository_root(Path(__file__))
+        manager = logical_path(root, "voice/runtime_manager.py").read_text()
         self.assertIn('"--barge-in"', manager)
         self.assertIn('"--startup-phrase"', manager)
 
     def test_service_has_side_effect_free_release_compatibility_preflight(self):
-        root = Path(__file__).resolve().parents[1]
-        wrapper = (root / "voice/service").read_text()
+        root = repository_root(Path(__file__))
+        wrapper = logical_path(root, "voice/service").read_text()
         parse_check = wrapper.index('if [ "${1:-}" = "--check" ]')
         resolve = wrapper.index('resolve --path')
         preflight_exit = wrapper.index(
@@ -131,6 +133,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("voice/candidate-service", RUNTIME_FILES)
         self.assertIn("voice/test_duplex.py", RUNTIME_FILES)
         self.assertIn("voice/release.py", RUNTIME_FILES)
+        self.assertIn("voice/repository_layout.py", RUNTIME_FILES)
         self.assertIn("voice/test_health.py", RUNTIME_FILES)
         self.assertIn("voice/turn_contract.py", RUNTIME_FILES)
         self.assertIn("voice/test_turn_contract.py", RUNTIME_FILES)
@@ -305,6 +308,71 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(list(managed_state.iterdir()), [lock_path])
             self.assertFalse(sentinel.exists())
             self.assertFalse(app_server_sentinel.exists())
+
+    def test_service_normal_startup_uses_canonical_root_without_side_effects(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            _, release_state, digest = self.staged(directory, "normal-startup")
+            promote(release_state, digest, canary(digest), apply=True)
+            runtime_state = base / "runtime"
+            fake_bin = base / "bin"
+            fake_bin.mkdir()
+            calls = base / "calls"
+            real_python = sys.executable
+
+            (fake_bin / "codex").write_text(
+                f"#!/bin/sh\nprintf 'codex %s\\n' \"$*\" >> {calls}\n"
+            )
+            (fake_bin / "cargo").write_text(
+                f"#!/bin/sh\nprintf 'cargo %s\\n' \"$*\" >> {calls}\n"
+            )
+            (fake_bin / "curl").write_text(
+                "#!/bin/sh\n"
+                f"printf 'curl %s\\n' \"$*\" >> {calls}\n"
+                "case \"$*\" in\n"
+                "  *8880/health*) exit 0 ;;\n"
+                f"  *8787/healthz*) test -e {base / 'relay-probed'} && exit 0; "
+                f"touch {base / 'relay-probed'}; exit 1 ;;\n"
+                "esac\n"
+                "exit 1\n"
+            )
+            (fake_bin / "python").write_text(
+                "#!/bin/sh\n"
+                f"case \"$1\" in\n  */integration/relay.py|*/voice/runtime_manager.py) "
+                f"printf 'python %s\\n' \"$*\" >> {calls}; exit 0 ;;\nesac\n"
+                f"exec {real_python} \"$@\"\n"
+            )
+            for executable in fake_bin.iterdir():
+                executable.chmod(0o755)
+
+            completed = subprocess.run(
+                [str(Path(__file__).with_name("service")), "thread"],
+                check=False,
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                    "ZERO_VOICE_LOCKED": "1",
+                    "ZERO_VOICE_STATE_DIR": str(runtime_state),
+                    "ZERO_VOICE_RELEASE_STATE": str(release_state),
+                },
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            invocation_log = calls.read_text()
+            root = repository_root(Path(__file__))
+            self.assertIn(
+                f"cargo build --release --manifest-path {root}/core/Cargo.toml --bin zer0d",
+                invocation_log,
+            )
+            self.assertIn(
+                f"python {root}/integration/relay.py --events {runtime_state}/events.jsonl "
+                f"--zer0d {root}/core/target/release/zer0d",
+                invocation_log,
+            )
+            self.assertIn(f"--root {root}", invocation_log)
+            self.assertIn(f"--metrics {root}/bench/voice-history.jsonl", invocation_log)
 
     def test_incompatible_service_check_creates_no_state_or_lock(self):
         with tempfile.TemporaryDirectory() as directory:
