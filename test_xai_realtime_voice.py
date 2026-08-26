@@ -24,11 +24,12 @@ class Event:
     final: bool = False
     call_id: str | None = None
     tool_name: str | None = None
+    item_id: str | None = None
     arguments: dict = field(default_factory=dict)
 
     @classmethod
-    def audio(cls, value):
-        return cls(type=EventType.AUDIO, audio_bytes=value)
+    def audio(cls, value, *, item_id=None):
+        return cls(type=EventType.AUDIO, audio_bytes=value, item_id=item_id)
 
     @classmethod
     def transcript(cls, value, *, final=False):
@@ -39,12 +40,55 @@ class Event:
         return cls(type=EventType.TOOL_CALL, call_id=call_id, tool_name=name, arguments=arguments)
 
 
-class Session: pass
+@dataclass(frozen=True)
+class HeardAudioBoundary:
+    item_id: str
+    audio_end_ms: int
+
+
+class Session:
+    async def truncate_response(self, boundary):
+        pass
+
 class Provider: pass
+
+
+class ExactContractCoordinator:
+    """Focused copy of Hermes PR #95147's public heard-boundary orchestration."""
+
+    def __init__(self, session):
+        self._session = session
+        self._current_item_id = None
+        self._current_audio_events = {}
+        self._heard_boundary = None
+
+    async def events(self):
+        async for event in self._session.events():
+            if event.type is EventType.AUDIO and event.item_id:
+                self._current_item_id = event.item_id
+                self._current_audio_events[id(event)] = event
+            yield event
+
+    def report_audio_heard(self, event, *, audio_end_ms):
+        if (
+            event.item_id != self._current_item_id
+            or self._current_audio_events.get(id(event)) is not event
+        ):
+            return False
+        self._heard_boundary = HeardAudioBoundary(event.item_id, audio_end_ms)
+        return True
+
+    async def cancel_response(self):
+        if self._heard_boundary is not None:
+            await self._session.truncate_response(self._heard_boundary)
+        await self._session.cancel_response()
+
+
 agent = types.ModuleType("agent")
 contract = types.ModuleType("agent.realtime_voice")
 contract.RealtimeEvent = Event
 contract.RealtimeEventType = EventType
+contract.HeardAudioBoundary = HeardAudioBoundary
 contract.RealtimeSession = Session
 contract.RealtimeVoiceProvider = Provider
 agent.realtime_voice = contract
@@ -124,7 +168,10 @@ class XAIRealtimeVoiceTests(unittest.IsolatedAsyncioTestCase):
                 "instructions": "Hermes owns tools",
                 "voice": "eve",
                 "audio": {
-                    "input": {"format": {"type": "audio/pcm", "rate": 24000}},
+                    "input": {
+                        "format": {"type": "audio/pcm", "rate": 24000},
+                        "transcription": {"model": "grok-transcribe"},
+                    },
                     "output": {"format": {"type": "audio/pcm", "rate": 24000}, "speed": 1.2},
                 },
                 "turn_detection": {"type": "server_vad"},
@@ -135,13 +182,13 @@ class XAIRealtimeVoiceTests(unittest.IsolatedAsyncioTestCase):
         }])
         await session.close()
 
-    async def test_events_stream_corrected_transcript_audio_and_turn_marks(self):
+    async def test_events_stream_cumulative_corrected_transcript_audio_and_turn_marks(self):
         socket, session = await self.make_session()
         for event in [
             {"type": "input_audio_buffer.speech_started"},
-            {"type": "conversation.item.input_audio_transcription.delta", "transcript": "turn on"},
-            {"type": "conversation.item.input_audio_transcription.delta", "transcript": "turn off"},
-            {"type": "conversation.item.input_audio_transcription.completed", "transcript": "turn off lights"},
+            {"type": "conversation.item.input_audio_transcription.updated", "transcript": "turn on"},
+            {"type": "conversation.item.input_audio_transcription.updated", "transcript": "turn off"},
+            {"type": "conversation.item.input_audio_transcription.updated", "transcript": "turn off lights"},
             {"type": "response.output_audio.delta", "delta": "YWJj", "item_id": "answer-1"},
             {"type": "response.done"},
         ]:
@@ -155,20 +202,43 @@ class XAIRealtimeVoiceTests(unittest.IsolatedAsyncioTestCase):
             EventType.TRANSCRIPT, EventType.AUDIO, EventType.TURN_ENDED,
         ])
         self.assertEqual([event.text for event in received[1:4]], ["turn on", "turn off", "turn off lights"])
-        self.assertEqual([event.final for event in received[1:4]], [False, False, True])
+        self.assertEqual([event.final for event in received[1:4]], [False, False, False])
         self.assertEqual(received[4].audio_bytes, b"abc")
+        self.assertEqual(received[4].item_id, "answer-1")
 
-    async def test_audio_send_and_barge_in_cancel_then_truncate_to_heard_audio(self):
+    async def test_exact_coordinator_contract_truncates_heard_audio_before_cancel(self):
         socket, session = await self.make_session()
+        coordinator = ExactContractCoordinator(session)
         await session.send_audio(b"pcm")
-        session.mark_audio_heard("answer-1", 640)
-        await session.cancel_response()
+
+        await socket.incoming.put(
+            {"type": "response.output_audio.delta", "delta": "YWJj", "item_id": "answer-1"}
+        )
+        output = await anext(coordinator.events())
+        self.assertTrue(coordinator.report_audio_heard(output, audio_end_ms=640))
+        await coordinator.cancel_response()
 
         self.assertEqual(socket.sent[1:], [
             {"type": "input_audio_buffer.append", "audio": "cGNt"},
-            {"type": "response.cancel"},
             {"type": "conversation.item.truncate", "item_id": "answer-1", "content_index": 0, "audio_end_ms": 640},
+            {"type": "response.cancel"},
         ])
+
+    async def test_corrected_transcript_replaces_prior_cumulative_value(self):
+        socket, session = await self.make_session()
+        for transcript in ("book a flight to Boston", "book a flight to Austin"):
+            await socket.incoming.put({
+                "type": "conversation.item.input_audio_transcription.updated",
+                "transcript": transcript,
+            })
+
+        stream = session.events()
+        rendered = ""
+        rendered = (await anext(stream)).text
+        rendered = (await anext(stream)).text
+
+        self.assertEqual(rendered, "book a flight to Austin")
+        self.assertNotIn("Bostonbook", rendered)
 
     async def test_grouped_tool_results_continue_once_and_duplicate_call_ids_are_ignored(self):
         socket, session = await self.make_session()

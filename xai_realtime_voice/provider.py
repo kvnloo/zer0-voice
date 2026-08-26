@@ -8,7 +8,13 @@ import os
 from collections import deque
 from typing import Any
 
-from agent.realtime_voice import RealtimeEvent, RealtimeEventType, RealtimeSession, RealtimeVoiceProvider
+from agent.realtime_voice import (
+    HeardAudioBoundary,
+    RealtimeEvent,
+    RealtimeEventType,
+    RealtimeSession,
+    RealtimeVoiceProvider,
+)
 
 _ENDPOINT = "wss://api.x.ai/v1/realtime?model=grok-voice-latest"
 
@@ -20,7 +26,6 @@ class XAIRealtimeSession(RealtimeSession):
         self._closed = False
         self._reconnected = False
         self._conversation_id: str | None = None
-        self._heard: tuple[str, int] | None = None
         self._buffer: deque[dict[str, Any]] = deque()
         self._tool_group: set[str] = set()
         self._settled_calls: set[str] = set()
@@ -50,17 +55,12 @@ class XAIRealtimeSession(RealtimeSession):
                 self._conversation_id = event.get("conversation", {}).get("id")
             elif kind == "input_audio_buffer.speech_started":
                 yield RealtimeEvent(type=RealtimeEventType.TURN_STARTED)
-            elif kind in {
-                "conversation.item.input_audio_transcription.delta",
-                "conversation.item.input_audio_transcription.completed",
-            }:
-                yield RealtimeEvent.transcript(
-                    event.get("transcript", ""), final=kind.endswith(".completed")
-                )
+            elif kind == "conversation.item.input_audio_transcription.updated":
+                yield RealtimeEvent.transcript(event.get("transcript", ""))
             elif kind in {"response.output_audio.delta", "response.audio.delta"}:
                 audio = base64.b64decode(event["delta"], validate=True)
                 self._audio_output_bytes += len(audio)
-                yield RealtimeEvent.audio(audio)
+                yield RealtimeEvent.audio(audio, item_id=event.get("item_id"))
             elif kind == "response.function_call_arguments.done":
                 group = [event]
                 while True:
@@ -100,22 +100,17 @@ class XAIRealtimeSession(RealtimeSession):
             await self._send({"type": "response.create"})
             self._tool_group.clear()
 
+    async def truncate_response(self, boundary: HeardAudioBoundary) -> None:
+        """Keep provider history aligned with audio the host actually rendered."""
+        await self._send({
+            "type": "conversation.item.truncate",
+            "item_id": boundary.item_id,
+            "content_index": 0,
+            "audio_end_ms": boundary.audio_end_ms,
+        })
+
     async def cancel_response(self) -> None:
         await self._send({"type": "response.cancel"})
-        if self._heard is not None:
-            item_id, audio_end_ms = self._heard
-            await self._send({
-                "type": "conversation.item.truncate",
-                "item_id": item_id,
-                "content_index": 0,
-                "audio_end_ms": audio_end_ms,
-            })
-
-    def mark_audio_heard(self, item_id: str, audio_end_ms: int) -> None:
-        """Record the audible boundary; generated audio is not conversation history."""
-        if audio_end_ms < 0:
-            raise ValueError("audio_end_ms cannot be negative")
-        self._heard = (item_id, audio_end_ms)
 
     def metrics(self) -> dict[str, int]:
         """Return bounded counters only: never credentials, transcripts, or provider errors."""
@@ -194,7 +189,10 @@ class XAIRealtimeVoiceProvider(RealtimeVoiceProvider):
                 "instructions": instructions,
                 "voice": voice,
                 "audio": {
-                    "input": {"format": {"type": "audio/pcm", "rate": 24000}},
+                    "input": {
+                        "format": {"type": "audio/pcm", "rate": 24000},
+                        "transcription": {"model": "grok-transcribe"},
+                    },
                     "output": {
                         "format": {"type": "audio/pcm", "rate": 24000},
                         "speed": self._speed,

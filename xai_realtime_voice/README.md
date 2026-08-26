@@ -10,7 +10,7 @@ Server-side environment only:
 - `HERMES_XAI_VOICE_SPEED` (optional, `0.7`–`1.5`, default `1.0`)
 - `HERMES_XAI_VOICE_REASONING` (optional, `high` or `none`, default `high`)
 
-The provider opens `grok-voice-latest`, enables resumable sessions, supplies only Hermes function schemas (no xAI web/X/file/MCP server tools), streams corrected cumulative user transcripts and PCM output deltas, groups parallel function results before one continuation, and truncates provider history to the host-reported heard-audio boundary on barge-in. Metrics are counters only.
+The provider opens `grok-voice-latest`, enables `grok-transcribe` input transcription and resumable sessions, supplies only Hermes function schemas (no xAI web/X/file/MCP server tools), streams corrected cumulative user transcripts and item-identified PCM output deltas, groups parallel function results before one continuation, and implements Hermes' provider-neutral `truncate_response(HeardAudioBoundary)` contract. The Hermes coordinator truncates provider history to the host-reported heard-audio boundary before cancelling on barge-in. Metrics are counters only.
 
 Verification:
 
